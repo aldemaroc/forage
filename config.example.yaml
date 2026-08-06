@@ -80,6 +80,7 @@ extract:
 
 # --- Browser pool (Playwright/Chromium, in-process) ----------
 browser:
+  engine: playwright       # "playwright" (default) or "patchright" (anti-detection fork, same API)
   min_idle: 1              # browsers kept warm at boot (standby)
   max_instances: 5         # pool ceiling (parallel URL extraction)
   idle_timeout: 60         # seconds idle before an instance is closed

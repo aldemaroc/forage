@@ -91,6 +91,7 @@ otherwise                                                 → static result
 
 | Key | Default | Description |
 |---|---|---|
+| `engine` | `playwright` | Browser engine: `playwright` (default) or `patchright` (anti-detection fork of Playwright, same API). Requires `patchright install chromium` in the image; switching engine only needs a config change and `docker compose restart`. |
 | `min_idle` | `1` | Browsers kept warm at boot (standby). `0` = lazy (launch on demand). |
 | `max_instances` | `5` | Pool ceiling; also the browser concurrency bound for parallel URL extraction. |
 | `idle_timeout` | `60` | Seconds an idle instance stays alive before it is closed. |

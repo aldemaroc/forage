@@ -100,6 +100,7 @@ async def health() -> dict:
         "service": "forage",
         "version": __version__,
         "config_source": config.source_path,
+        "browser_engine": config.browser.engine,
         "cache": {
             "enabled": config.cache.enabled,
             "max_entries": config.cache.max_entries,

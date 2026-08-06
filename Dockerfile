@@ -5,7 +5,8 @@ WORKDIR /srv/forage
 # Dependencies first (layer caching). Playwright downloads Chromium + system deps.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && playwright install --with-deps chromium
+    && playwright install --with-deps chromium \
+    && patchright install chromium
 
 # Application code
 COPY app/ app/

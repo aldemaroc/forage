@@ -33,6 +33,7 @@ Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
 
 class BrowserPool:
     def __init__(self, browser_config: Any, user_agent: Optional[str] = None) -> None:
+        self.engine = browser_config.engine
         self.min_idle = browser_config.min_idle
         self.max_instances = browser_config.max_instances
         self.idle_timeout = browser_config.idle_timeout
@@ -55,7 +56,10 @@ class BrowserPool:
         if self.max_instances < 1:
             logger.warning("Browser disabled (max_instances=0)")
             return
-        from playwright.async_api import async_playwright
+        if self.engine == "patchright":
+            from patchright.async_api import async_playwright
+        else:
+            from playwright.async_api import async_playwright
 
         self._pw = await async_playwright().start()
         self._semaphore = asyncio.Semaphore(self.max_instances)

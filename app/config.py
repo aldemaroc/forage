@@ -58,6 +58,7 @@ DEFAULTS: Dict[str, Any] = {
         "full_text_domains": [],
     },
     "browser": {
+        "engine": "playwright",
         "min_idle": 1,
         "max_instances": 5,
         "idle_timeout": 60,
@@ -149,6 +150,7 @@ class ExtractConfig:
 
 @dataclass(frozen=True)
 class BrowserConfig:
+    engine: str = "playwright"  # "playwright" (default) or "patchright"
     min_idle: int = 1
     max_instances: int = 5
     idle_timeout: int = 60
@@ -227,6 +229,8 @@ class ForageConfig:
             raise ValueError("browser pool sizes devem ser >= 0")
         if self.browser.scroll_steps < 0:
             raise ValueError("browser.scroll_steps deve ser >= 0")
+        if self.browser.engine not in ("playwright", "patchright"):
+            raise ValueError(f"browser.engine inválido: {self.browser.engine} (use playwright ou patchright)")
         if self.browser.min_idle > self.browser.max_instances and self.browser.max_instances > 0:
             raise ValueError("browser.min_idle não pode exceder browser.max_instances")
         for rule in self.extract.url_rewrites:
