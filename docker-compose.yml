@@ -1,0 +1,26 @@
+services:
+  forage:
+    build: .
+    image: forage:0.6.0
+    container_name: forage
+    restart: always
+    ports:
+      - "127.0.0.1:3672:3672"   # host-only bind: nothing external reaches it
+    volumes:
+      - ./config.yaml:/etc/forage/config.yaml:ro   # bind mount, read-only
+    env_file: .env
+    networks:
+      - searxng_default          # talk to SearXNG by service name (searxng:8080)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3672/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# SearXNG must run on this shared network so Forage can call it as searxng:8080.
+# See docs/SEARXNG.md. If your SearXNG compose uses another project name,
+# adjust the network name (and search.searxng_url in config.yaml) accordingly.
+networks:
+  searxng_default:
+    external: true

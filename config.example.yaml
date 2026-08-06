@@ -1,0 +1,97 @@
+# ============================================================
+# Forage configuration: example (safe to commit)
+# Copy to config.yaml and adjust for your instance.
+# Secrets NEVER go here: use env vars (e.g. FORAGE_API_KEYS).
+# Reload: docker compose restart
+# See docs/CONFIG.md for the full reference.
+# ============================================================
+
+# --- Server -------------------------------------------------
+server:
+  host: 0.0.0.0            # bind inside the container (bridge requires 0.0.0.0)
+  port: 3672               # default port (T9 of "FORA"); customize freely
+  workers: 2               # uvicorn workers
+  log_level: info          # debug | info | warning | error
+
+# --- Cache --------------------------------------------------
+# In-memory LRU only. Master switch: when enabled: false, ALL caching is off
+# regardless of per-section toggles. Per-section toggles can only disable
+# further (never enable over the master).
+cache:
+  enabled: true            # universal master switch
+  max_entries: 500         # global LRU cap (total keys, both caches)
+  search:
+    enabled: true          # cache search results
+    ttl: 300               # seconds (5 min); protects SearXNG engines from anti-bot
+  extract:
+    enabled: false         # off by default: extraction is always fresh
+    ttl: 3600              # seconds (1 h); pre-defined, used when enabled
+                           # (e.g. a short TTL like 120s gives fast repeat
+                           # extraction with bounded staleness)
+
+# --- Search (SearXNG) ----------------------------------------
+# Point this at your SearXNG instance. See docs/SEARXNG.md for setup.
+search:
+  searxng_url: http://searxng:8080   # service name on the shared docker network
+  default_lang: pt-BR     # language passed to SearXNG
+  engines: [google, bing, brave, startpage]  # optional engine filter
+  timeout: 15              # seconds per search
+
+# --- Extract ------------------------------------------------
+extract:
+  timeout: 30              # seconds, total per URL
+  max_content_chars: 100000 # cap on extracted content size
+  only_main_content: true  # strip nav/ads/footer (trafilatura)
+  user_agent: "ForageBot/0.1 (+https://github.com/aldemaroc/forage)"  # static fetch
+  # browser_user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+                           # browser (Playwright); commented = built-in Chrome desktop UA
+  respect_robots: false    # default: DO NOT respect robots.txt (configurable)
+  force_render: false      # hybrid default: static first, auto-fallback to browser
+  wait_for: null           # optional CSS selector to wait before extracting
+  min_content_chars: 200   # static result below this length -> browser fallback
+  raw_content_markdown: true
+                           # true: raw_content mirrors clean markdown (Firecrawl-style contract)
+                           # false: raw_content keeps the raw HTML
+  force_render_domains:    # these domains ALWAYS use the browser (SPAs, anti-bot)
+    - x.com
+    - twitter.com
+    - instagram.com
+    - linkedin.com
+    - tiktok.com
+    - youtube.com
+    - youtu.be
+  # url_rewrites: rewrite matching URLs before fetching. Useful for sites whose
+  # modern UI hides content behind JS (e.g. Reddit's lazy-loaded comments) but
+  # whose classic UI serves everything server-side.
+  # Format: match = "host/path-prefix" (www-insensitive), replace = "host[/path]".
+  # http/https, the remaining path, query and fragment are preserved.
+  # url_rewrites:
+  #   - match: "reddit.com/r/"    # subreddits / threads
+  #     replace: "old.reddit.com/r/"
+  #   - match: "reddit.com/u/"    # user profiles (old format)
+  #     replace: "old.reddit.com/u/"
+  #   - match: "reddit.com/user/" # user profiles (new UI uses /user/)
+  #     replace: "old.reddit.com/u/"
+  # full_text_domains: extract the WHOLE page text instead of main content.
+  # Forums / comment-heavy sites (trafilatura drops comments as non-main).
+  # full_text_domains:
+  #   - reddit.com
+  #   - youtube.com
+
+# --- Browser pool (Playwright/Chromium, in-process) ----------
+browser:
+  min_idle: 1              # browsers kept warm at boot (standby)
+  max_instances: 5         # pool ceiling (parallel URL extraction)
+  idle_timeout: 60         # seconds idle before an instance is closed
+  headless: true
+  launch_timeout: 30       # seconds to launch a new instance
+  stealth: true            # hide automation signals (anti-bot); ON by default
+  network_idle_timeout: 5  # seconds; cap for networkidle wait (streaming pages never idle)
+  scroll_steps: 0          # scroll-to-bottom passes in browser mode; triggers lazy
+                           # content (YouTube/Reddit comments). 0 (default) disables; it adds
+                           # ~6s on pages that don't grow. Enable only when needed.
+
+# --- Auth (optional) ------------------------------------------
+# API keys come from env: FORAGE_API_KEYS (comma separated)
+auth:
+  enabled: false           # when true, every request needs Authorization: Bearer <key>

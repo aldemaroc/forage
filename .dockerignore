@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.env.example
+config.yaml
+docs
+plugins
+README.md
+LICENSE
+*.md
+__pycache__
+*.pyc

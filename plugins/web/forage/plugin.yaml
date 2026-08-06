@@ -1,0 +1,7 @@
+name: web-forage
+version: 0.1.0
+description: "Forage web search & extract (self-hosted). Requires FORAGE_URL pointing at your instance."
+author: Aldemaro Campos
+kind: backend
+provides_web_providers:
+  - forage

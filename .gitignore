@@ -1,0 +1,16 @@
+# Secrets & local instance config
+.env
+config.yaml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
