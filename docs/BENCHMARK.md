@@ -99,8 +99,12 @@ non-empty title). ❌ = anti-bot (challenge/block), timeout, or no usable data
 
 ## Reproduce
 
+The benchmark scripts live in the `benchmark/` directory of this repository.
+
 ```bash
+cd benchmark
 # 1. Start three containers whose configs differ only in browser.engine
+#    (ports 3672, 3673, 3674 as defined at the top of benchmark_forage_engines.py)
 # 2. Run in parallel (same URL list, same criteria)
 python3 benchmark_forage_engines.py --engine playwright --out /tmp/forage_bench.json
 python3 benchmark_forage_engines.py --engine patchright --out /tmp/forage_bench.json
