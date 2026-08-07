@@ -6,7 +6,8 @@ WORKDIR /srv/forage
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium \
-    && patchright install chromium
+    && patchright install chromium \
+    && scrapling install
 
 # Application code
 COPY app/ app/

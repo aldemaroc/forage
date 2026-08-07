@@ -40,7 +40,7 @@ SPA_MARKERS = [
     'id="nuxt"',
     'id="svelte"',
     "data-reactroot",
-    "ng-app",
+    "ng-app=",          # attribute form only; bare "ng-app" matches "shopping-app" in prose
     "__NEXT_DATA__",
     "__NUXT__",
     "ytInitialData",  # YouTube (present in the static HTML shell)
@@ -117,9 +117,12 @@ CHALLENGE_TITLES = [
     "sucuri",
     "website is using a security service",
 ]
+# NOTE: "challenge-platform" is deliberately NOT a marker. Cloudflare injects
+# /cdn-cgi/challenge-platform/scripts/jsd/main.js into EVERY page it serves
+# (JS detections), even with no active challenge - the substring would false
+# positive on any Cloudflare-backed site.
 CHALLENGE_MARKERS = [
     "cf-challenge",
-    "challenge-platform",
     "cf-browser-verification",
     "cf-error-details",
 ]
@@ -276,6 +279,7 @@ def _extract_text(html: str, only_main_content: bool, max_chars: int) -> str:
     if only_main_content:
         text = trafilatura.extract(
             html,
+            output_format="markdown",  # structured markdown (headings, bold, lists)
             include_comments=False,
             include_tables=True,
             favor_precision=False,
@@ -339,6 +343,11 @@ async def extract_url(
         if status in (401, 403, 429):
             logger.info("%s -> HTTP %d, falling back to browser", url, status)
             want_browser = True
+        elif html is not None and looks_like_challenge(html, _extract_title(html)):
+            # Some anti-bot setups (e.g. Cloudflare managed challenge) answer
+            # 200 with a challenge page. Give the browser a shot before failing.
+            logger.info("%s -> static anti-bot challenge page, falling back to browser", url)
+            want_browser = True
 
     if want_browser:
         try:
@@ -383,13 +392,36 @@ async def extract_url(
 
     title = _extract_title(html)
     if looks_like_challenge(html, title):
-        logger.warning("%s -> anti-bot challenge page detected", url)
-        return {
-            "url": original_url,
-            "title": title,
-            "method": method,
-            "error": "Blocked by anti-bot challenge (Cloudflare or similar)",
-        }
+        if config.browser.fallback_solver:
+            # Last-resort retry: the scrapling built-in solver handles
+            # challenges (including interactive ones) that the page_action
+            # poll cannot. Only pays the ~5s/page solver cost on failure.
+            logger.info("%s -> anti-bot challenge, retrying with scrapling solver", url)
+            try:
+                solver_html = await pool.render_with_solver(url, wait_for=wait_for, timeout=effective_timeout)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Solver retry failed for %s: %s", url, exc)
+                solver_html = None
+            if solver_html:
+                html = solver_html
+                method = "browser+solver"
+                title = _extract_title(html)
+                if output_format == "html":
+                    content = html
+                    raw_content = html[: config.extract.max_content_chars]
+                else:
+                    content = _extract_text(html, effective_main, config.extract.max_content_chars)
+                    raw_content = content if config.extract.raw_content_markdown else html[: config.extract.max_content_chars]
+                if not content:
+                    return {"url": original_url, "error": "No content extracted"}
+        if looks_like_challenge(html, title):
+            logger.warning("%s -> anti-bot challenge page detected%s", url, " (after solver retry)" if method == "browser+solver" else "")
+            return {
+                "url": original_url,
+                "title": title,
+                "method": method,
+                "error": "Blocked by anti-bot challenge (Cloudflare or similar)",
+            }
 
     result: Dict[str, Any] = {
         "url": original_url,

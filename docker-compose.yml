@@ -1,7 +1,7 @@
 services:
   forage:
     build: .
-    image: forage:0.6.0
+    image: forage:0.7.0
     container_name: forage
     restart: always
     ports:

@@ -91,7 +91,7 @@ otherwise                                                 → static result
 
 | Key | Default | Description |
 |---|---|---|
-| `engine` | `playwright` | Browser engine: `playwright` (default) or `patchright` (anti-detection fork of Playwright, same API). Requires `patchright install chromium` in the image; switching engine only needs a config change and `docker compose restart`. |
+| `engine` | `playwright` | Browser engine: `playwright` (default), `patchright` (anti-detection fork of Playwright, same API) or `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass). Switching engine only needs a config change and `docker compose restart`. |
 | `min_idle` | `1` | Browsers kept warm at boot (standby). `0` = lazy (launch on demand). |
 | `max_instances` | `5` | Pool ceiling; also the browser concurrency bound for parallel URL extraction. |
 | `idle_timeout` | `60` | Seconds an idle instance stays alive before it is closed. |
@@ -100,6 +100,9 @@ otherwise                                                 → static result
 | `stealth` | `true` | Hide automation signals (anti-bot). Adds `--disable-blink-features=AutomationControlled`, an init script masking `navigator.webdriver`/`chrome`/`languages`/`plugins`, and a real Chrome UA. |
 | `network_idle_timeout` | `5` | Seconds cap for the `networkidle` wait during render. Pages with streaming/websockets (e.g. X) never go idle, so this cap bounds the render time; lower it for faster worst-case extraction, raise it if pages need more time to hydrate via XHR. |
 | `scroll_steps` | `0` | Scroll-to-bottom passes in browser mode before extracting. Triggers lazy-loaded content (YouTube/Reddit comments mount only when scrolled into view). **Off by default**: it adds ~6s on browser pages that don't grow; enable per-instance only when lazy comments are needed. |
+| `challenge_timeout` | `15` | Max seconds to wait for a Cloudflare/Turnstile challenge to auto-resolve after load. Only used by the `scrapling` engine (polling inside `page_action`). |
+| `solve_cloudflare` | `false` | `scrapling` engine only. `false` (default) uses Forage's own title-poll in `page_action`, which resolves non-interactive challenges with no fixed cost. `true` uses Scrapling's built-in solver, which handles interactive challenges but waits ~5s for networkidle on every page before detecting. |
+| `fallback_solver` | `true` | On any anti-bot failure (challenge detected, any engine), retry the page with the scrapling built-in solver as a last resort. The ~5s/page solver cost is paid only when a challenge is actually detected, turning would-be failures into successes. |
 
 ## `auth`
 

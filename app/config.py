@@ -67,6 +67,9 @@ DEFAULTS: Dict[str, Any] = {
         "stealth": True,
         "network_idle_timeout": 5,
         "scroll_steps": 0,
+        "challenge_timeout": 15,
+        "solve_cloudflare": False,
+        "fallback_solver": True,
     },
     "auth": {"enabled": False},
 }
@@ -150,7 +153,7 @@ class ExtractConfig:
 
 @dataclass(frozen=True)
 class BrowserConfig:
-    engine: str = "playwright"  # "playwright" (default) or "patchright"
+    engine: str = "playwright"  # "playwright" (default), "patchright" or "scrapling"
     min_idle: int = 1
     max_instances: int = 5
     idle_timeout: int = 60
@@ -159,6 +162,9 @@ class BrowserConfig:
     stealth: bool = True
     network_idle_timeout: int = 5
     scroll_steps: int = 0
+    challenge_timeout: int = 15  # max seconds to wait for an anti-bot challenge to auto-resolve (scrapling engine)
+    solve_cloudflare: bool = False  # scrapling: use its built-in Cloudflare solver (adds ~5s/page) or the page_action poll (default)
+    fallback_solver: bool = True  # on anti-bot failure, retry with scrapling + built-in solver as last resort
 
 
 @dataclass(frozen=True)
@@ -229,8 +235,12 @@ class ForageConfig:
             raise ValueError("browser pool sizes devem ser >= 0")
         if self.browser.scroll_steps < 0:
             raise ValueError("browser.scroll_steps deve ser >= 0")
-        if self.browser.engine not in ("playwright", "patchright"):
-            raise ValueError(f"browser.engine inválido: {self.browser.engine} (use playwright ou patchright)")
+        if self.browser.challenge_timeout < 0:
+            raise ValueError("browser.challenge_timeout deve ser >= 0")
+        if self.browser.solve_cloudflare and self.browser.engine != "scrapling":
+            raise ValueError("browser.solve_cloudflare só se aplica ao engine scrapling")
+        if self.browser.engine not in ("playwright", "patchright", "scrapling"):
+            raise ValueError(f"browser.engine inválido: {self.browser.engine} (use playwright, patchright ou scrapling)")
         if self.browser.min_idle > self.browser.max_instances and self.browser.max_instances > 0:
             raise ValueError("browser.min_idle não pode exceder browser.max_instances")
         for rule in self.extract.url_rewrites:

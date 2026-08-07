@@ -30,8 +30,30 @@ Object.defineProperty(navigator, 'languages', {get: () => ['pt-BR', 'pt', 'en-US
 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
 """
 
+# Titles that indicate an anti-bot challenge page (Cloudflare Turnstile etc.).
+# Used to wait for non-interactive challenges to auto-resolve after load.
+CHALLENGE_TITLES = (
+    "just a moment",
+    "attention required",
+    "checking your browser",
+    "verifying you are human",
+)
+
 
 class BrowserPool:
+    """In-process browser pool for Forage.
+
+    Supports three engines:
+      - playwright (default): vanilla Playwright Chromium with light stealth
+      - patchright: undetected Playwright fork (same API)
+      - scrapling: StealthyFetcher from the Scrapling framework, which
+        impersonates real browser fingerprints and can solve Cloudflare
+        Turnstile/Interstitial out of the box. A single AsyncStealthySession
+        is kept alive and its internal tab pool (max_pages) handles
+        concurrency; networkidle and scrolling are replicated inside a
+        page_action so behaviour matches the Playwright path.
+    """
+
     def __init__(self, browser_config: Any, user_agent: Optional[str] = None) -> None:
         self.engine = browser_config.engine
         self.min_idle = browser_config.min_idle
@@ -40,6 +62,9 @@ class BrowserPool:
         self.launch_timeout = browser_config.launch_timeout
         self.network_idle_timeout = browser_config.network_idle_timeout
         self.scroll_steps = browser_config.scroll_steps
+        self.challenge_timeout = browser_config.challenge_timeout
+        self.solve_cloudflare = browser_config.solve_cloudflare
+        self.fallback_solver = browser_config.fallback_solver
         self.headless = browser_config.headless
         self.stealth = browser_config.stealth
         # Explicit browser UA wins; otherwise fall back to a real Chrome UA
@@ -48,13 +73,38 @@ class BrowserPool:
         self._idle: Deque[tuple[float, Any]] = deque()  # (last_used, browser)
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._pw: Optional[Any] = None
+        self._scrapling_session: Optional[Any] = None
+        self._solver_session: Optional[Any] = None  # lazy; scrapling session with solve_cloudflare=True (last-resort retry)
+        self._solver_lock = asyncio.Lock()  # guards lazy solver session creation (any engine)
         self._cleanup_task: Optional[asyncio.Task] = None
         self._started = False
 
     async def start(self) -> None:
-        """Launch the playwright driver and warm min_idle browsers."""
+        """Launch the engine and warm the pool."""
         if self.max_instances < 1:
             logger.warning("Browser disabled (max_instances=0)")
+            return
+        if self.engine == "scrapling":
+            from scrapling.fetchers import AsyncStealthySession
+
+            # network_idle is handled inside page_action (capped), so the
+            # session itself does not wait for it (streaming pages would
+            # otherwise hit the full fetch timeout). solve_cloudflare is
+            # configurable: the built-in solver costs ~5s per page (it waits
+            # for networkidle before detecting), while our page_action polls
+            # the title and resolves non-interactive challenges for free.
+            self._scrapling_session = AsyncStealthySession(
+                headless=self.headless,
+                network_idle=False,
+                timeout=self.launch_timeout * 1000,
+                max_pages=max(1, self.max_instances),
+                solve_cloudflare=self.solve_cloudflare,
+                useragent=self.user_agent,
+            )
+            await self._scrapling_session.start()
+            self._semaphore = asyncio.Semaphore(self.max_instances)
+            self._started = True
+            logger.info("Scrapling session ready (max_pages=%d)", self.max_instances)
             return
         if self.engine == "patchright":
             from patchright.async_api import async_playwright
@@ -73,6 +123,18 @@ class BrowserPool:
         logger.info("Browser pool ready: %d idle, max %d", len(self._idle), self.max_instances)
 
     async def stop(self) -> None:
+        if self._scrapling_session is not None:
+            try:
+                await self._scrapling_session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._scrapling_session = None
+        if self._solver_session is not None:
+            try:
+                await self._solver_session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._solver_session = None
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
             try:
@@ -137,7 +199,9 @@ class BrowserPool:
         wait_for: Optional[str] = None,
         timeout: int = 30,
     ) -> str:
-        """Render a URL with Chromium and return the final DOM HTML."""
+        """Render a URL with the configured engine and return the final DOM HTML."""
+        if self.engine == "scrapling":
+            return await self._scrapling_render(url, wait_for, timeout)
         browser = await self.acquire()
         page = None
         try:
@@ -171,6 +235,122 @@ class BrowserPool:
                 except Exception:  # noqa: BLE001
                     pass
             self.release(browser)
+
+    async def _scrapling_render(
+        self,
+        url: str,
+        wait_for: Optional[str] = None,
+        timeout: int = 30,
+    ) -> str:
+        """Render via Scrapling StealthyFetcher (single shared session).
+
+        networkidle and scrolling are replicated inside a page_action so the
+        behaviour matches the Playwright path: domcontentloaded -> capped
+        networkidle wait (best-effort) -> optional scroll -> page content.
+        """
+        if not self._started or self._scrapling_session is None or self._semaphore is None:
+            raise RuntimeError("Scrapling session not started or disabled")
+
+        async def _page_action(page: Any) -> None:
+            # Cloudflare Turnstile non-interactive challenges auto-validate a
+            # few seconds after load. The StealthyFetcher's solver runs before
+            # page_action and can miss a challenge that is still booting, so
+            # wait here until the challenge title disappears. Polling the title
+            # is cheap and never hangs streaming pages (they have no challenge).
+            for _ in range(max(1, self.challenge_timeout)):
+                title = (await page.title()).lower()
+                if not any(c in title for c in CHALLENGE_TITLES):
+                    break
+                await page.wait_for_timeout(1000)
+            if self.network_idle_timeout > 0:
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle",
+                        timeout=self.network_idle_timeout * 1000,
+                    )
+                except Exception:  # noqa: BLE001 (networkidle is best-effort)
+                    pass
+            if self.scroll_steps > 0:
+                await self._scroll_to_bottom(page)
+
+        await self._semaphore.acquire()
+        try:
+            resp = await self._scrapling_session.fetch(
+                url,
+                timeout=timeout * 1000,
+                wait_selector=wait_for or None,
+                page_action=_page_action,
+            )
+            if resp is None or not resp.body:
+                raise RuntimeError(f"Empty response for {url}")
+            return resp.body.decode("utf-8", errors="ignore")
+        finally:
+            self._semaphore.release()
+
+    async def _get_solver_session(self) -> Any:
+        """Lazily create the scrapling session with the built-in Cloudflare
+        solver enabled (last-resort retry for anti-bot failures)."""
+        # Check INSIDE the lock: a concurrent retry may have assigned the
+        # session but not finished start() yet; returning it early would call
+        # fetch() on a session that is not alive ("Context manager has been
+        # closed").
+        async with self._solver_lock:
+            if self._solver_session is None:
+                from scrapling.fetchers import AsyncStealthySession
+
+                self._solver_session = AsyncStealthySession(
+                    headless=self.headless,
+                    network_idle=False,
+                    timeout=self.launch_timeout * 1000,
+                    max_pages=max(1, self.max_instances),
+                    solve_cloudflare=True,
+                    useragent=self.user_agent,
+                )
+                await self._solver_session.start()
+                logger.info("Scrapling solver session ready (last-resort anti-bot retry)")
+        return self._solver_session
+
+    async def render_with_solver(
+        self,
+        url: str,
+        wait_for: Optional[str] = None,
+        timeout: int = 30,
+    ) -> str:
+        """Render with the scrapling session that has solve_cloudflare=True.
+
+        Used as a last-resort retry when the configured engine hits an
+        anti-bot challenge. The built-in solver can handle interactive
+        challenges that the page_action poll cannot.
+        """
+        if not self._started or self._semaphore is None:
+            raise RuntimeError("Browser pool not started or disabled")
+        session = await self._get_solver_session()
+
+        async def _page_action(page: Any) -> None:
+            if self.network_idle_timeout > 0:
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle",
+                        timeout=self.network_idle_timeout * 1000,
+                    )
+                except Exception:  # noqa: BLE001 (networkidle is best-effort)
+                    pass
+            if self.scroll_steps > 0:
+                await self._scroll_to_bottom(page)
+
+        await self._semaphore.acquire()
+        try:
+            resp = await session.fetch(
+                url,
+                timeout=timeout * 1000,
+                wait_selector=wait_for or None,
+                page_action=_page_action,
+            )
+            if resp is None or not resp.body:
+                raise RuntimeError(f"Empty response for {url}")
+            return resp.body.decode("utf-8", errors="ignore")
+        finally:
+            self._semaphore.release()
 
     async def _scroll_to_bottom(self, page: Any) -> None:
         """Scroll the page to the bottom to trigger lazy-loaded content.

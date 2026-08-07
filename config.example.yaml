@@ -80,8 +80,10 @@ extract:
 
 # --- Browser pool (Playwright/Chromium, in-process) ----------
 browser:
-  engine: playwright       # "playwright" (default) or "patchright" (anti-detection fork, same API)
-  min_idle: 1              # browsers kept warm at boot (standby)
+  engine: playwright       # "playwright" (default), "patchright" (anti-detection fork,
+                           # same API) or "scrapling" (StealthyFetcher: fingerprint
+                           # impersonation + Cloudflare Turnstile bypass)
+  min_idle: 1              # browsers kept warm at boot (standby; scrapling keeps a session)
   max_instances: 5         # pool ceiling (parallel URL extraction)
   idle_timeout: 60         # seconds idle before an instance is closed
   headless: true
@@ -91,6 +93,15 @@ browser:
   scroll_steps: 0          # scroll-to-bottom passes in browser mode; triggers lazy
                            # content (YouTube/Reddit comments). 0 (default) disables; it adds
                            # ~6s on pages that don't grow. Enable only when needed.
+  challenge_timeout: 15    # seconds; how long to wait for a Cloudflare/Turnstile challenge
+                           # to auto-resolve after load (scrapling engine only)
+  solve_cloudflare: false  # scrapling only: use the built-in Cloudflare solver instead of
+                           # the page_action poll. The built-in solver waits ~5s per page
+                           # before detecting; the poll (default) resolves non-interactive
+                           # challenges with no fixed cost
+  fallback_solver: true    # on any anti-bot failure (any engine), retry the page with the
+                           # scrapling built-in solver as a last resort. Costs ~5s/page only
+                           # when a challenge is detected; turns failures into successes
 
 # --- Auth (optional) ------------------------------------------
 # API keys come from env: FORAGE_API_KEYS (comma separated)
