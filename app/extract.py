@@ -382,7 +382,6 @@ async def extract_url(
     ``force_render`` or ``wait_for`` explicitly, they override the domain
     override.
     """
-    effective_timeout = timeout or config.extract.timeout
     method = "static"
 
     original_url = url
@@ -399,6 +398,17 @@ async def extract_url(
     )
     effective_main = only_main_content and not bool(override and override.full_text)
     effective_scroll = bool(override and override.scroll)
+    effective_timeout = (
+        timeout
+        or (override.timeout if override is not None else None)
+        or config.extract.timeout
+    )
+    effective_idle = (
+        override.network_idle_timeout if override is not None else None
+    )
+    effective_challenge = (
+        override.challenge_timeout if override is not None else None
+    )
 
     rewritten = rewrite_url(url, override)
     if rewritten != url:
@@ -440,6 +450,8 @@ async def extract_url(
                 wait_for=effective_wait_for,
                 timeout=effective_timeout,
                 scroll_steps=_scroll_steps_for(config, effective_scroll),
+                network_idle_timeout=effective_idle,
+                challenge_timeout=effective_challenge,
             )
             method = "browser"
         except Exception as exc:  # noqa: BLE001
@@ -462,6 +474,8 @@ async def extract_url(
                     wait_for=effective_wait_for,
                     timeout=effective_timeout,
                     scroll_steps=_scroll_steps_for(config, effective_scroll),
+                    network_idle_timeout=effective_idle,
+                    challenge_timeout=effective_challenge,
                 )
                 method = "browser"
             except Exception as exc:  # noqa: BLE001
@@ -494,9 +508,10 @@ async def extract_url(
             try:
                 solver_html = await pool.render_with_solver(
                     url,
-                    wait_for=wait_for,
+                    wait_for=effective_wait_for,
                     timeout=effective_timeout,
                     scroll_steps=_scroll_steps_for(config, effective_scroll),
+                    network_idle_timeout=effective_idle,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Solver retry failed for %s: %s", url, exc)

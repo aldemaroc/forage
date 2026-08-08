@@ -129,6 +129,9 @@ class DomainOverride:
     wait_for: Optional[str] = None
     url_rewrite: Optional[str] = None
     scroll: Optional[bool] = None
+    timeout: Optional[int] = None
+    network_idle_timeout: Optional[int] = None
+    challenge_timeout: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +249,18 @@ class ForageConfig:
                 raise ValueError(
                     f"extract.domain_overrides[{override.pattern}]: url_rewrite deve ser "
                     "'host[/path-prefix]' (ex.: old.reddit.com/r/): {override.url_rewrite!r}"
+                )
+            if override.timeout is not None and not (1 <= override.timeout <= 120):
+                raise ValueError(
+                    f"extract.domain_overrides[{override.pattern}]: timeout deve estar entre 1 e 120s"
+                )
+            if override.network_idle_timeout is not None and not (0 <= override.network_idle_timeout <= 60):
+                raise ValueError(
+                    f"extract.domain_overrides[{override.pattern}]: network_idle_timeout deve estar entre 0 e 60s"
+                )
+            if override.challenge_timeout is not None and not (0 <= override.challenge_timeout <= 120):
+                raise ValueError(
+                    f"extract.domain_overrides[{override.pattern}]: challenge_timeout deve estar entre 0 e 120s"
                 )
 
 

@@ -227,17 +227,22 @@ class BrowserPool:
         wait_for: Optional[str] = None,
         timeout: int = 30,
         scroll_steps: Optional[int] = None,
+        network_idle_timeout: Optional[int] = None,
+        challenge_timeout: Optional[int] = None,
     ) -> str:
         """Render a URL with the configured engine and return the final DOM HTML.
 
-        ``scroll_steps`` overrides the global ``browser.scroll_steps`` for this
-        call (domain overrides use it to enable/disable scrolling per site).
+        Per-call overrides (used by domain_overrides): ``scroll_steps``,
+        ``network_idle_timeout`` and ``challenge_timeout``; None falls back
+        to the global browser config.
         """
         steps = self.scroll_steps if scroll_steps is None else scroll_steps
+        idle_cap = self.network_idle_timeout if network_idle_timeout is None else network_idle_timeout
+        chal_cap = self.challenge_timeout if challenge_timeout is None else challenge_timeout
         if self.engine == "scrapling":
-            return await self._scrapling_render(url, wait_for, timeout, steps)
+            return await self._scrapling_render(url, wait_for, timeout, steps, idle_cap, chal_cap)
         if self.engine == "obscura":
-            return await self._cdp_render(url, wait_for, timeout, steps)
+            return await self._cdp_render(url, wait_for, timeout, steps, idle_cap)
         browser = await self.acquire()
         page = None
         try:
@@ -256,7 +261,7 @@ class BrowserPool:
                 try:
                     await page.wait_for_load_state(
                         "networkidle",
-                        timeout=self.network_idle_timeout * 1000,
+                        timeout=idle_cap * 1000,
                     )
                 except Exception:  # noqa: BLE001 (networkidle is best-effort)
                     pass
@@ -278,6 +283,7 @@ class BrowserPool:
         wait_for: Optional[str] = None,
         timeout: int = 30,
         scroll_steps: int = 0,
+        network_idle_timeout: Optional[int] = None,
     ) -> str:
         """Render via an external Obscura CDP server (engine=obscura).
 
@@ -288,6 +294,7 @@ class BrowserPool:
         """
         if not self._started or self._cdp_browser is None or self._semaphore is None:
             raise RuntimeError("Obscura CDP not connected or disabled")
+        idle_cap = self.network_idle_timeout if network_idle_timeout is None else network_idle_timeout
 
         await self._semaphore.acquire()
         page = None
@@ -311,7 +318,7 @@ class BrowserPool:
                 try:
                     await page.wait_for_load_state(
                         "networkidle",
-                        timeout=self.network_idle_timeout * 1000,
+                        timeout=idle_cap * 1000,
                     )
                 except Exception:  # noqa: BLE001 (networkidle is best-effort)
                     pass
@@ -338,6 +345,8 @@ class BrowserPool:
         wait_for: Optional[str] = None,
         timeout: int = 30,
         scroll_steps: int = 0,
+        network_idle_timeout: Optional[int] = None,
+        challenge_timeout: Optional[int] = None,
     ) -> str:
         """Render via Scrapling StealthyFetcher (single shared session).
 
@@ -347,6 +356,8 @@ class BrowserPool:
         """
         if not self._started or self._scrapling_session is None or self._semaphore is None:
             raise RuntimeError("Scrapling session not started or disabled")
+        idle_cap = self.network_idle_timeout if network_idle_timeout is None else network_idle_timeout
+        chal_cap = self.challenge_timeout if challenge_timeout is None else challenge_timeout
 
         async def _page_action(page: Any) -> None:
             # Cloudflare Turnstile non-interactive challenges auto-validate a
@@ -354,16 +365,16 @@ class BrowserPool:
             # page_action and can miss a challenge that is still booting, so
             # wait here until the challenge title disappears. Polling the title
             # is cheap and never hangs streaming pages (they have no challenge).
-            for _ in range(max(1, self.challenge_timeout)):
+            for _ in range(max(1, chal_cap)):
                 title = (await page.title()).lower()
                 if not any(c in title for c in CHALLENGE_TITLES):
                     break
                 await page.wait_for_timeout(1000)
-            if self.network_idle_timeout > 0:
+            if idle_cap > 0:
                 try:
                     await page.wait_for_load_state(
                         "networkidle",
-                        timeout=self.network_idle_timeout * 1000,
+                        timeout=idle_cap * 1000,
                     )
                 except Exception:  # noqa: BLE001 (networkidle is best-effort)
                     pass
@@ -413,6 +424,7 @@ class BrowserPool:
         wait_for: Optional[str] = None,
         timeout: int = 30,
         scroll_steps: Optional[int] = None,
+        network_idle_timeout: Optional[int] = None,
     ) -> str:
         """Render with the scrapling session that has solve_cloudflare=True.
 
@@ -424,13 +436,14 @@ class BrowserPool:
             raise RuntimeError("Browser pool not started or disabled")
         session = await self._get_solver_session()
         steps = self.scroll_steps if scroll_steps is None else scroll_steps
+        idle_cap = self.network_idle_timeout if network_idle_timeout is None else network_idle_timeout
 
         async def _page_action(page: Any) -> None:
-            if self.network_idle_timeout > 0:
+            if idle_cap > 0:
                 try:
                     await page.wait_for_load_state(
                         "networkidle",
-                        timeout=self.network_idle_timeout * 1000,
+                        timeout=idle_cap * 1000,
                     )
                 except Exception:  # noqa: BLE001 (networkidle is best-effort)
                     pass

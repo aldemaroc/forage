@@ -69,36 +69,74 @@ extract:
   #                           "host[/path]" (e.g. "old.reddit.com/r/"), the
   #                           remaining path, query and fragment are preserved
   #   scroll: bool         -> scroll to bottom to mount lazy content
-  # Request-level params (force_render/wait_for in the API call) are absolute
-  # and override the domain override.
+  #   timeout: int (1-120) -> total seconds budget per URL (default 30)
+  #   network_idle_timeout: int (0-60) -> cap for the networkidle wait after
+  #                           DOMContentLoaded (streaming pages never idle,
+  #                           lower it; slow hydrating pages, raise it)
+  #   challenge_timeout: int (0-120) -> max seconds to wait for an anti-bot
+  #                           challenge to auto-resolve (Cloudflare/Turnstile)
+  # Request-level params (force_render/wait_for/timeout in the API call) are
+  # absolute and override the domain override.
   domain_overrides:
     x.com:
       force_render: true
+      network_idle_timeout: 3   # streaming: never goes idle, cut early
+      timeout: 45
     twitter.com:
       force_render: true
+      network_idle_timeout: 3
+      timeout: 45
     instagram.com:
       force_render: true
+      timeout: 45
     linkedin.com:
       force_render: true
+      timeout: 45
     tiktok.com:
       force_render: true
+      challenge_timeout: 30     # puzzle captcha is intermittent
+      timeout: 60
     youtube.com:
       force_render: true
-      scroll: true            # comments mount on scroll
+      scroll: true              # comments mount on scroll
+      network_idle_timeout: 10  # slow hydration (comments/recommendations)
+      timeout: 60
     youtu.be:
       force_render: true
       scroll: true
+      network_idle_timeout: 10
+      timeout: 60
     ".amazon.*":
-      force_render: true      # product pages: price arrives via JS after load
-      full_text: true         # keep the buybox (trafilatura drops it)
-    reddit.com/r/:            # classic UI serves comments server-side
+      force_render: true        # product pages: price arrives via JS after load
+      full_text: true           # keep the buybox (trafilatura drops it)
+      timeout: 60               # 1.5MB+ DOM with the full buybox
+    reddit.com/r/:              # classic UI serves comments server-side
       url_rewrite: "old.reddit.com/r/"
     reddit.com/u/:
       url_rewrite: "old.reddit.com/u/"
     reddit.com/user/:
       url_rewrite: "old.reddit.com/u/"
-    reddit.com:               # after rewrite, keep full text (comments)
+    reddit.com:                 # after rewrite, keep full text (comments)
       full_text: true
+    fandom.com:
+      force_render: true        # 3.3MB HTML (16-24s in the benchmark)
+      network_idle_timeout: 10
+      timeout: 60
+    dailymail.co.uk:
+      force_render: true        # heavy Cloudflare (only scrapling passes)
+      challenge_timeout: 30
+      timeout: 60
+    stackoverflow.com:
+      force_render: true        # intermittent Cloudflare
+      challenge_timeout: 30
+      timeout: 45
+    zoom.us:
+      force_render: true        # pricing page ~15s in the benchmark
+      timeout: 45
+    twitch.tv:
+      force_render: true
+      network_idle_timeout: 3   # streaming: never goes idle
+      timeout: 45
 
 # --- Browser pool (Playwright/Chromium, in-process) ----------
 browser:
