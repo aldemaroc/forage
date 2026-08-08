@@ -80,7 +80,7 @@ cp config.example.yaml config.yaml   # behavior: port, cache, browser, ...
 ```bash
 docker compose up -d --build
 curl http://localhost:3672/health
-# → {"status":"ok","service":"forage","version":"0.7.0",...}
+# → {"status":"ok","service":"forage","version":"0.8.0",...}
 ```
 
 4. **Try it**
@@ -94,7 +94,7 @@ curl -s -X POST http://localhost:3672/search -H 'Content-Type: application/json'
 curl -s -X POST http://localhost:3672/extract -H 'Content-Type: application/json' \
   -d '{"urls":["https://en.wikipedia.org/wiki/Guineafowl"],"formats":["markdown"]}'
 
-# Extract (browser-forced; x.com is in force_render_domains by default)
+# Extract (browser-forced; x.com has a force_render domain override by default)
 curl -s -X POST http://localhost:3672/extract -H 'Content-Type: application/json' \
   -d '{"urls":["https://x.com/OpenAI"]}'
 
@@ -194,8 +194,7 @@ cache:    { enabled, max_entries, search: {enabled, ttl}, extract: {enabled, ttl
 search:   { searxng_url, default_lang, engines, timeout }
 extract:  { timeout, max_content_chars, only_main_content, user_agent,
             browser_user_agent, respect_robots, force_render, wait_for,
-            min_content_chars, raw_content_markdown, force_render_domains,
-            url_rewrites, full_text_domains }
+            min_content_chars, raw_content_markdown, domain_overrides }
 browser:  { engine, min_idle, max_instances, idle_timeout, headless, launch_timeout,
             stealth, network_idle_timeout, scroll_steps, challenge_timeout,
             solve_cloudflare, fallback_solver }
@@ -214,7 +213,7 @@ auth:     { enabled }
 ## How extraction decides: static vs browser
 
 ```
-domain in force_render_domains | force_render | wait_for  → browser
+domain override force_render | request force_render | wait_for → browser
 fetch statically (httpx)
 status 401/403/429                                        → browser
 looks like SPA (#root, __NEXT_DATA__, ...)                 → browser

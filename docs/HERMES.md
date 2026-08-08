@@ -86,8 +86,8 @@ forage_full_extract(urls=[...], format="markdown", force_render=false, wait_for=
 The tool is registered in the `forage` toolset, which Hermes enables by
 default for new plugins. If it does not appear after a gateway restart, run
 `hermes tools` and make sure the `forage` toolset is enabled for your
-platform. The underlying service config (rewrites, `full_text_domains`,
-stealth, etc.) still applies.
+platform. The underlying service config (`domain_overrides` rewrites,
+`full_text`, stealth, etc.) still applies.
 
 ## 4. Enabling auth
 

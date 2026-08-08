@@ -50,15 +50,11 @@ DEFAULTS: Dict[str, Any] = {
         "wait_for": None,
         "min_content_chars": 200,
         "raw_content_markdown": True,
-        "force_render_domains": [
-            "x.com", "twitter.com", "instagram.com", "linkedin.com", "tiktok.com",
-            "youtube.com", "youtu.be",
-        ],
-        "url_rewrites": [],
-        "full_text_domains": [],
+        "domain_overrides": {},
     },
     "browser": {
         "engine": "playwright",
+        "cdp_url": "",       # engine=obscura: CDP endpoint of the Obscura server (http://host:port or ws://host:port)
         "min_idle": 1,
         "max_instances": 5,
         "idle_timeout": 60,
@@ -119,16 +115,20 @@ class SearchConfig:
 
 
 @dataclass(frozen=True)
-class UrlRewrite:
-    """Prefix rewrite rule: host (www-insensitive) + path prefix -> new host/path.
+class DomainOverride:
+    """Per-domain extraction overrides.
 
-    Example: match="reddit.com/r/", replace="old.reddit.com"
-    rewrites https://www.reddit.com/r/selfhosted/... to
-    https://old.reddit.com/r/selfhosted/... (http/https and www are normalized).
+    Fields are Optional so an override can set only what it cares about.
+    ``pattern`` is the YAML key it was declared under (e.g. ``amazon.*`` or
+    ``reddit.com/r/``); it is carried here so url_rewrite knows the match.
     """
 
-    match: str
-    replace: str
+    pattern: str
+    force_render: Optional[bool] = None
+    full_text: Optional[bool] = None
+    wait_for: Optional[str] = None
+    url_rewrite: Optional[str] = None
+    scroll: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -143,17 +143,13 @@ class ExtractConfig:
     wait_for: Optional[str] = None
     min_content_chars: int = 200
     raw_content_markdown: bool = True
-    force_render_domains: tuple = (
-        "x.com", "twitter.com", "instagram.com", "linkedin.com", "tiktok.com",
-        "youtube.com", "youtu.be",
-    )
-    url_rewrites: tuple = ()
-    full_text_domains: tuple = ()
+    domain_overrides: tuple = ()
 
 
 @dataclass(frozen=True)
 class BrowserConfig:
-    engine: str = "playwright"  # "playwright" (default), "patchright" or "scrapling"
+    engine: str = "playwright"  # "playwright" (default), "patchright", "scrapling" or "obscura"
+    cdp_url: str = ""  # engine=obscura: CDP endpoint (http://host:port or ws://host:port)
     min_idle: int = 1
     max_instances: int = 5
     idle_timeout: int = 60
@@ -207,11 +203,9 @@ class ForageConfig:
             extract=ExtractConfig(
                 **{
                     **extract,
-                    "url_rewrites": tuple(
-                        UrlRewrite(**r) for r in extract.get("url_rewrites", [])
-                    ),
-                    "full_text_domains": tuple(
-                        extract.get("full_text_domains", [])
+                    "domain_overrides": tuple(
+                        DomainOverride(pattern=pattern, **over)
+                        for pattern, over in extract.get("domain_overrides", {}).items()
                     ),
                 }
             ),
@@ -239,18 +233,19 @@ class ForageConfig:
             raise ValueError("browser.challenge_timeout deve ser >= 0")
         if self.browser.solve_cloudflare and self.browser.engine != "scrapling":
             raise ValueError("browser.solve_cloudflare só se aplica ao engine scrapling")
-        if self.browser.engine not in ("playwright", "patchright", "scrapling"):
-            raise ValueError(f"browser.engine inválido: {self.browser.engine} (use playwright, patchright ou scrapling)")
+        if self.browser.engine not in ("playwright", "patchright", "scrapling", "obscura"):
+            raise ValueError(f"browser.engine inválido: {self.browser.engine} (use playwright, patchright, scrapling ou obscura)")
+        if self.browser.engine == "obscura" and not self.browser.cdp_url:
+            raise ValueError("browser.engine=obscura exige browser.cdp_url (ex.: http://127.0.0.1:9223)")
         if self.browser.min_idle > self.browser.max_instances and self.browser.max_instances > 0:
             raise ValueError("browser.min_idle não pode exceder browser.max_instances")
-        for rule in self.extract.url_rewrites:
-            if not rule.match or not rule.replace:
+        for override in self.extract.domain_overrides:
+            if not override.pattern:
+                raise ValueError("extract.domain_overrides: padrão de domínio não pode ser vazio")
+            if override.url_rewrite and "/" not in override.url_rewrite:
                 raise ValueError(
-                    "extract.url_rewrites: cada regra precisa de 'match' e 'replace' não vazios"
-                )
-            if "/" not in rule.match:
-                raise ValueError(
-                    f"extract.url_rewrites: match deve ser 'host/path-prefix' (ex.: reddit.com/r/): {rule.match!r}"
+                    f"extract.domain_overrides[{override.pattern}]: url_rewrite deve ser "
+                    "'host[/path-prefix]' (ex.: old.reddit.com/r/): {override.url_rewrite!r}"
                 )
 
 

@@ -1,7 +1,7 @@
-"""Hybrid extraction: static HTTP first, Playwright browser fallback.
+"""Hybrid extraction: static HTTP first, browser fallback.
 
 Decision flow (config-driven):
-  1. domain in force_render_domains | force_render | wait_for  -> browser
+  1. domain override force_render | request force_render | wait_for -> browser
   2. static fetch (httpx)
   3. HTTP 403/429                                          -> browser
   4. looks_like_spa(html) or trafilatura text < min_content_chars -> browser
@@ -11,6 +11,7 @@ Decision flow (config-driven):
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -52,55 +53,114 @@ def _domain(url: str) -> str:
     return (urlparse(url).hostname or "").lower()
 
 
-def _domain_matches(domain: str, pattern: str) -> bool:
-    pattern = pattern.lower().strip()
+def _host_and_path(url: str) -> Tuple[str, str]:
+    """Return (www-normalized host, path) for a URL."""
+    host = _domain(url)
+    if host.startswith("www."):
+        host = host[4:]
+    path = urlparse(url).path or "/"
+    return host, path
+
+
+def _host_suffixes(host: str) -> Tuple[str, ...]:
+    """All suffix labels of a host, e.g. a.b.example.com ->
+    (a.b.example.com, b.example.com, example.com, com)."""
+    parts = host.split(".")
+    return tuple(".".join(parts[i:]) for i in range(len(parts)))
+
+
+def _pattern_matches(url: str, pattern: str) -> bool:
+    """Match a URL against a domain override pattern.
+
+    Pattern syntax (www-insensitive, case-insensitive):
+      - ``x.com``            -> host or any subdomain (endswith match)
+      - ``.x.com``           -> same, leading dot is explicit convention
+      - ``amazon.*``         -> wildcard on a host label (fnmatch); matches
+                                the host itself and any subdomain suffix
+      - ``reddit.com/r/``    -> exact host + path prefix (path matching)
+    A pattern with a path requires an exact host match, so
+    ``reddit.com/r/`` does NOT match ``old.reddit.com/r/``.
+    """
+    pattern = (pattern or "").lower().strip()
     if not pattern:
         return False
-    return domain == pattern or domain.endswith("." + pattern)
+    if pattern.startswith("www."):
+        pattern = pattern[4:]
+    # Leading dot is an explicit "base domain + subdomains" convention.
+    if pattern.startswith("."):
+        pattern = pattern[1:]
+    if "/" in pattern:
+        host_pat, _, path_pat = pattern.partition("/")
+        path_pat = "/" + path_pat
+        host, path = _host_and_path(url)
+        if host != host_pat:
+            return False
+        return path.startswith(path_pat.rstrip("/"))
+    host, _ = _host_and_path(url)
+    return any(fnmatch.fnmatch(s, pattern) for s in _host_suffixes(host))
 
 
-def _in_domain_list(url: str, domains: Tuple[str, ...]) -> bool:
-    domain = _domain(url)
-    return any(_domain_matches(domain, d) for d in domains)
+def _find_override(url: str, overrides: Tuple[Any, ...]) -> Optional[Any]:
+    """Return the most specific domain override matching a URL, or None.
+
+    Specificity: pattern length (a ``reddit.com/r/`` pattern beats
+    ``reddit.com``), then declaration order. Patterns are matched on the
+    original URL BEFORE any rewrite is applied.
+    """
+    best = None
+    best_len = -1
+    for override in overrides:
+        if not _pattern_matches(url, override.pattern):
+            continue
+        if len(override.pattern) > best_len:
+            best = override
+            best_len = len(override.pattern)
+    return best
 
 
-def rewrite_url(url: str, rules: Tuple[Any, ...]) -> str:
-    """Apply the first matching prefix rewrite rule to a URL.
+def rewrite_url(url: str, override: Optional[Any]) -> str:
+    """Apply a domain override's url_rewrite to a URL.
 
-    Rule format: ``match`` is "host/path-prefix" (www-insensitive host),
-    ``replace`` is the new "host[/path-prefix]". Scheme (http/https), the
-    remaining path, query and fragment are preserved.
+    The override pattern is the match (host[/path-prefix], www-insensitive)
+    and ``override.url_rewrite`` is the replacement. Scheme, the remaining
+    path, query and fragment are preserved.
 
-    Example: match="reddit.com/r/", replace="old.reddit.com/r/" turns
+    Example: pattern="reddit.com/r/", url_rewrite="old.reddit.com/r/" turns
     https://www.reddit.com/r/selfhosted/comments/xyz into
     https://old.reddit.com/r/selfhosted/comments/xyz.
     """
+    if override is None or not override.url_rewrite:
+        return url
+    match = (override.pattern or "").lower()
+    if match.startswith("www."):
+        match = match[4:]
+    if match.startswith("."):
+        match = match[1:]
+    m_host, _, m_path = match.partition("/")
+    m_path = "/" + m_path if m_path else ""
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
     path = parsed.path or "/"
-    for rule in rules:
-        match = (rule.match or "").lower()
-        m_host, _, m_path = match.partition("/")
-        m_path = "/" + m_path if m_path else ""
-        if host != m_host or not path.startswith(m_path):
-            continue
-        replace = (rule.replace or "").lower()
-        r_host, _, r_path = replace.partition("/")
-        r_path = "/" + r_path if r_path else ""
-        rest = path[len(m_path):]
-        if r_path:
-            new_path = r_path.rstrip("/") + "/" + rest.lstrip("/") if rest else r_path.rstrip("/") + "/"
-        else:
-            new_path = "/" + rest.lstrip("/") if rest else "/"
-        new_url = f"{parsed.scheme}://{r_host}{new_path}"
-        if parsed.query:
-            new_url += "?" + parsed.query
-        if parsed.fragment:
-            new_url += "#" + parsed.fragment
-        return new_url
-    return url
+    if host != m_host or not path.startswith(m_path):
+        return url
+    replace = (override.url_rewrite or "").lower()
+    if replace.startswith("www."):
+        replace = replace[4:]
+    r_host, _, r_path = replace.partition("/")
+    r_path = "/" + r_path if r_path else ""
+    rest = path[len(m_path):]
+    if r_path:
+        new_path = r_path.rstrip("/") + "/" + rest.lstrip("/") if rest else r_path.rstrip("/") + "/"
+    else:
+        new_path = "/" + rest.lstrip("/") if rest else "/"
+    new_url = f"{parsed.scheme}://{r_host}{new_path}"
+    if parsed.query:
+        new_url += "?" + parsed.query
+    if parsed.fragment:
+        new_url += "#" + parsed.fragment
+    return new_url
 
 
 def looks_like_spa(html: str) -> bool:
@@ -290,6 +350,18 @@ def _extract_text(html: str, only_main_content: bool, max_chars: int) -> str:
     return text[:max_chars]
 
 
+def _scroll_steps_for(config: ForageConfig, scroll: bool) -> int:
+    """Effective scroll rounds for a render call.
+
+    The domain override ``scroll: true`` forces at least one round even when
+    the global ``browser.scroll_steps`` is 0 (the default), so lazy content
+    (Reddit/YouTube comments) gets a chance to mount.
+    """
+    if not scroll:
+        return 0
+    return max(config.browser.scroll_steps, 1)
+
+
 async def extract_url(
     config: ForageConfig,
     pool: BrowserPool,
@@ -301,36 +373,48 @@ async def extract_url(
     only_main_content: bool = True,
     timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Extract a single URL using the hybrid strategy. Hermes-envelope entry."""
+    """Extract a single URL using the hybrid strategy. Hermes-envelope entry.
+
+    Domain overrides (``extract.domain_overrides``) are resolved on the
+    original URL and may: rewrite the URL, force the browser, force the
+    whole-page text path, set a default wait_for selector, or enable
+    scrolling. Request-level parameters are absolute: when the caller passes
+    ``force_render`` or ``wait_for`` explicitly, they override the domain
+    override.
+    """
     effective_timeout = timeout or config.extract.timeout
     method = "static"
 
     original_url = url
-    rewritten = rewrite_url(url, config.extract.url_rewrites)
+
+    # Resolve the domain override on the ORIGINAL URL (before any rewrite).
+    override = _find_override(url, config.extract.domain_overrides)
+    if override is not None:
+        logger.debug("%s -> domain override %r applied", url, override.pattern)
+
+    # Request-level params are absolute: they win over the domain override.
+    effective_force_render = force_render or bool(override and override.force_render)
+    effective_wait_for = wait_for if wait_for is not None else (
+        override.wait_for if override is not None else None
+    )
+    effective_main = only_main_content and not bool(override and override.full_text)
+    effective_scroll = bool(override and override.scroll)
+
+    rewritten = rewrite_url(url, override)
     if rewritten != url:
         logger.info("%s -> URL rewritten to %s", url, rewritten)
         url = rewritten
 
-    # Forums and comment-heavy sites: trafilatura treats comments as non-main
-    # content and drops them. full_text_domains forces the whole-page path.
-    effective_main = only_main_content and not _in_domain_list(
-        url, config.extract.full_text_domains
-    )
-
     # Documents (pdf/docx/xlsx/pptx/rtf) are extracted from raw bytes -
     # never through the browser (Chromium renders PDFs poorly). Falls back
     # to the hybrid flow when the URL is not actually a document.
-    if not force_render:
+    if not effective_force_render:
         doc_result = await _extract_document(config, url, effective_timeout)
         if doc_result is not None:
             doc_result["url"] = original_url
             return doc_result
 
-    want_browser = (
-        force_render
-        or bool(wait_for)
-        or _in_domain_list(url, config.extract.force_render_domains)
-    )
+    want_browser = effective_force_render or bool(effective_wait_for)
 
     html: Optional[str] = None
     status = 0
@@ -351,7 +435,12 @@ async def extract_url(
 
     if want_browser:
         try:
-            html = await pool.render(url, wait_for=wait_for, timeout=effective_timeout)
+            html = await pool.render(
+                url,
+                wait_for=effective_wait_for,
+                timeout=effective_timeout,
+                scroll_steps=_scroll_steps_for(config, effective_scroll),
+            )
             method = "browser"
         except Exception as exc:  # noqa: BLE001
             logger.warning("Browser render failed for %s: %s", url, exc)
@@ -368,7 +457,12 @@ async def extract_url(
         if looks_like_spa(html) or len(text) < config.extract.min_content_chars:
             logger.info("%s -> low content (%d chars), falling back to browser", url, len(text))
             try:
-                html = await pool.render(url, wait_for=wait_for, timeout=effective_timeout)
+                html = await pool.render(
+                    url,
+                    wait_for=effective_wait_for,
+                    timeout=effective_timeout,
+                    scroll_steps=_scroll_steps_for(config, effective_scroll),
+                )
                 method = "browser"
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Browser render failed for %s: %s", url, exc)
@@ -398,7 +492,12 @@ async def extract_url(
             # poll cannot. Only pays the ~5s/page solver cost on failure.
             logger.info("%s -> anti-bot challenge, retrying with scrapling solver", url)
             try:
-                solver_html = await pool.render_with_solver(url, wait_for=wait_for, timeout=effective_timeout)
+                solver_html = await pool.render_with_solver(
+                    url,
+                    wait_for=wait_for,
+                    timeout=effective_timeout,
+                    scroll_steps=_scroll_steps_for(config, effective_scroll),
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Solver retry failed for %s: %s", url, exc)
                 solver_html = None

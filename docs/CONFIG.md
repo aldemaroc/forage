@@ -55,23 +55,27 @@ Bypass per request with the `Cache-Control: no-cache` header; the response heade
 | `wait_for` | `null` | CSS selector to wait for before extracting (browser mode). |
 | `min_content_chars` | `200` | If static extraction yields less text than this, Forage falls back to the browser. |
 | `raw_content_markdown` | `true` | `true`: `raw_content` mirrors the clean markdown (Firecrawl-style contract; what Hermes' `web_extract_tool` reads first). `false`: `raw_content` keeps the raw HTML. |
-| `force_render_domains` | `[x.com, twitter.com, instagram.com, linkedin.com, tiktok.com, youtube.com, youtu.be]` | Domains that always use the browser (SPAs, strict anti-bot). |
-| `url_rewrites` | `[]` | List of prefix rewrite rules applied **before** fetching. Each rule has `match` ("host/path-prefix", www-insensitive) and `replace` ("host[/path]"). Scheme (http/https), the remaining path, query and fragment are preserved. Useful when a site's modern UI hides content behind JS (e.g. Reddit lazy-loads comments) but a classic UI serves everything server-side. The envelope keeps the original `url` and adds `rewritten_url` when a rule fires. |
-| `full_text_domains` | `[]` | Domains where extraction uses the **whole page text** instead of `only_main_content`; keeps forum comments, which trafilatura drops as non-main content. |
+| `domain_overrides` | `{}` | Per-pattern extraction overrides. The YAML key is a pattern (www-insensitive, case-insensitive): `x.com` matches the host or any subdomain; `.x.com` is the same with an explicit leading dot; `amazon.*` is a wildcard on a host label (fnmatch) that matches the host and any subdomain suffix; `reddit.com/r/` requires an exact host plus a path prefix. Supported keys per override: `force_render` (bool), `full_text` (bool), `wait_for` (str), `url_rewrite` (str, format `host[/path]`), `scroll` (bool). Request-level `force_render`/`wait_for` are absolute and override the domain override. |
 
-Example: serve Reddit threads and profiles from the classic UI so comments are extracted without a browser:
+Example: serve Reddit threads/profiles from the classic UI (comments are server-side there) and keep the Amazon buybox (price arrives via JS; trafilatura drops it as non-main):
 
 ```yaml
 extract:
-  url_rewrites:
-    - match: "reddit.com/r/"    # subreddits / threads
-      replace: "old.reddit.com/r/"
-    - match: "reddit.com/u/"    # user profiles (old format)
-      replace: "old.reddit.com/u/"
-    - match: "reddit.com/user/" # user profiles (new UI uses /user/)
-      replace: "old.reddit.com/u/"
-  full_text_domains:
-    - reddit.com                # keep comments (trafilatura drops them otherwise)
+  domain_overrides:
+    ".amazon.*":              # all Amazon TLDs + subdomains
+      force_render: true      # price arrives via JS after load
+      full_text: true         # keep the buybox (trafilatura drops it)
+    reddit.com/r/:            # subreddits / threads
+      url_rewrite: "old.reddit.com/r/"
+    reddit.com/u/:            # user profiles (old format)
+      url_rewrite: "old.reddit.com/u/"
+    reddit.com/user/:         # user profiles (new UI uses /user/)
+      url_rewrite: "old.reddit.com/u/"
+    reddit.com:               # after rewrite, keep comments
+      full_text: true
+    youtube.com:
+      force_render: true
+      scroll: true            # comments mount on scroll
 ```
 
 `https://www.reddit.com/r/selfhosted/comments/abc` → fetched as `https://old.reddit.com/r/selfhosted/comments/abc`; the envelope reports `url` as the original and `rewritten_url` as the fetched one.
@@ -79,7 +83,7 @@ extract:
 ### Hybrid decision flow
 
 ```
-domain in force_render_domains | force_render | wait_for  → browser
+domain override force_render | request force_render | wait_for → browser
 fetch statically
 status 401/403/429                                        → browser
 HTML looks like a SPA (#root, __NEXT_DATA__, data-reactroot…) → browser

@@ -52,31 +52,53 @@ extract:
   raw_content_markdown: true
                            # true: raw_content mirrors clean markdown (Firecrawl-style contract)
                            # false: raw_content keeps the raw HTML
-  force_render_domains:    # these domains ALWAYS use the browser (SPAs, anti-bot)
-    - x.com
-    - twitter.com
-    - instagram.com
-    - linkedin.com
-    - tiktok.com
-    - youtube.com
-    - youtu.be
-  # url_rewrites: rewrite matching URLs before fetching. Useful for sites whose
-  # modern UI hides content behind JS (e.g. Reddit's lazy-loaded comments) but
-  # whose classic UI serves everything server-side.
-  # Format: match = "host/path-prefix" (www-insensitive), replace = "host[/path]".
-  # http/https, the remaining path, query and fragment are preserved.
-  # url_rewrites:
-  #   - match: "reddit.com/r/"    # subreddits / threads
-  #     replace: "old.reddit.com/r/"
-  #   - match: "reddit.com/u/"    # user profiles (old format)
-  #     replace: "old.reddit.com/u/"
-  #   - match: "reddit.com/user/" # user profiles (new UI uses /user/)
-  #     replace: "old.reddit.com/u/"
-  # full_text_domains: extract the WHOLE page text instead of main content.
-  # Forums / comment-heavy sites (trafilatura drops comments as non-main).
-  # full_text_domains:
-  #   - reddit.com
-  #   - youtube.com
+  # domain_overrides: per-pattern extraction overrides. The YAML key is a
+  # pattern (www-insensitive, case-insensitive):
+  #   "x.com"            -> host or any subdomain
+  #   ".x.com"           -> same, leading dot is an explicit convention
+  #   "amazon.*"         -> wildcard on a host label (fnmatch); matches the
+  #                         host itself and any subdomain suffix
+  #   "reddit.com/r/"    -> exact host + path prefix (path matching)
+  # Supported override keys:
+  #   force_render: bool   -> always use the browser (SPAs, anti-bot)
+  #   full_text: bool      -> extract the WHOLE page text instead of main
+  #                           content (forums/comment-heavy sites; trafilatura
+  #                           drops comments and buyboxes as non-main)
+  #   wait_for: str        -> default CSS selector to wait before extracting
+  #   url_rewrite: str     -> rewrite matching URLs before fetching; format
+  #                           "host[/path]" (e.g. "old.reddit.com/r/"), the
+  #                           remaining path, query and fragment are preserved
+  #   scroll: bool         -> scroll to bottom to mount lazy content
+  # Request-level params (force_render/wait_for in the API call) are absolute
+  # and override the domain override.
+  domain_overrides:
+    x.com:
+      force_render: true
+    twitter.com:
+      force_render: true
+    instagram.com:
+      force_render: true
+    linkedin.com:
+      force_render: true
+    tiktok.com:
+      force_render: true
+    youtube.com:
+      force_render: true
+      scroll: true            # comments mount on scroll
+    youtu.be:
+      force_render: true
+      scroll: true
+    ".amazon.*":
+      force_render: true      # product pages: price arrives via JS after load
+      full_text: true         # keep the buybox (trafilatura drops it)
+    reddit.com/r/:            # classic UI serves comments server-side
+      url_rewrite: "old.reddit.com/r/"
+    reddit.com/u/:
+      url_rewrite: "old.reddit.com/u/"
+    reddit.com/user/:
+      url_rewrite: "old.reddit.com/u/"
+    reddit.com:               # after rewrite, keep full text (comments)
+      full_text: true
 
 # --- Browser pool (Playwright/Chromium, in-process) ----------
 browser:

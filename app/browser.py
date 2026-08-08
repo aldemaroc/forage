@@ -43,7 +43,7 @@ CHALLENGE_TITLES = (
 class BrowserPool:
     """In-process browser pool for Forage.
 
-    Supports three engines:
+    Supports four engines:
       - playwright (default): vanilla Playwright Chromium with light stealth
       - patchright: undetected Playwright fork (same API)
       - scrapling: StealthyFetcher from the Scrapling framework, which
@@ -52,10 +52,15 @@ class BrowserPool:
         is kept alive and its internal tab pool (max_pages) handles
         concurrency; networkidle and scrolling are replicated inside a
         page_action so behaviour matches the Playwright path.
+      - obscura: external CDP server (the Obscura Rust/V8 browser). The
+        pool connects via Playwright connect_over_cdp to browser.cdp_url
+        instead of launching Chromium locally. Concurrency is capped by
+        max_instances (the CDP server owns the actual browser processes).
     """
 
     def __init__(self, browser_config: Any, user_agent: Optional[str] = None) -> None:
         self.engine = browser_config.engine
+        self.cdp_url = getattr(browser_config, "cdp_url", "")  # engine=obscura
         self.min_idle = browser_config.min_idle
         self.max_instances = browser_config.max_instances
         self.idle_timeout = browser_config.idle_timeout
@@ -73,6 +78,7 @@ class BrowserPool:
         self._idle: Deque[tuple[float, Any]] = deque()  # (last_used, browser)
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._pw: Optional[Any] = None
+        self._cdp_browser: Optional[Any] = None  # engine=obscura: connected CDP browser
         self._scrapling_session: Optional[Any] = None
         self._solver_session: Optional[Any] = None  # lazy; scrapling session with solve_cloudflare=True (last-resort retry)
         self._solver_lock = asyncio.Lock()  # guards lazy solver session creation (any engine)
@@ -106,6 +112,22 @@ class BrowserPool:
             self._started = True
             logger.info("Scrapling session ready (max_pages=%d)", self.max_instances)
             return
+        if self.engine == "obscura":
+            # External CDP server (Obscura). Connect once; the server owns
+            # the browser processes. Concurrency is capped client-side.
+            from playwright.async_api import async_playwright
+
+            if not self.cdp_url:
+                raise RuntimeError("browser.cdp_url is required for engine=obscura")
+            self._pw = await async_playwright().start()
+            self._cdp_browser = await self._pw.chromium.connect_over_cdp(
+                endpoint_url=self.cdp_url,
+                timeout=self.launch_timeout * 1000,
+            )
+            self._semaphore = asyncio.Semaphore(self.max_instances)
+            self._started = True
+            logger.info("Obscura CDP connected: %s", self.cdp_url)
+            return
         if self.engine == "patchright":
             from patchright.async_api import async_playwright
         else:
@@ -123,6 +145,12 @@ class BrowserPool:
         logger.info("Browser pool ready: %d idle, max %d", len(self._idle), self.max_instances)
 
     async def stop(self) -> None:
+        if self._cdp_browser is not None:
+            try:
+                await self._cdp_browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._cdp_browser = None
         if self._scrapling_session is not None:
             try:
                 await self._scrapling_session.close()
@@ -198,10 +226,18 @@ class BrowserPool:
         url: str,
         wait_for: Optional[str] = None,
         timeout: int = 30,
+        scroll_steps: Optional[int] = None,
     ) -> str:
-        """Render a URL with the configured engine and return the final DOM HTML."""
+        """Render a URL with the configured engine and return the final DOM HTML.
+
+        ``scroll_steps`` overrides the global ``browser.scroll_steps`` for this
+        call (domain overrides use it to enable/disable scrolling per site).
+        """
+        steps = self.scroll_steps if scroll_steps is None else scroll_steps
         if self.engine == "scrapling":
-            return await self._scrapling_render(url, wait_for, timeout)
+            return await self._scrapling_render(url, wait_for, timeout, steps)
+        if self.engine == "obscura":
+            return await self._cdp_render(url, wait_for, timeout, steps)
         browser = await self.acquire()
         page = None
         try:
@@ -224,8 +260,8 @@ class BrowserPool:
                     )
                 except Exception:  # noqa: BLE001 (networkidle is best-effort)
                     pass
-            if self.scroll_steps > 0:
-                await self._scroll_to_bottom(page)
+            if steps > 0:
+                await self._scroll_to_bottom(page, steps)
             html = await page.content()
             return html
         finally:
@@ -236,11 +272,72 @@ class BrowserPool:
                     pass
             self.release(browser)
 
+    async def _cdp_render(
+        self,
+        url: str,
+        wait_for: Optional[str] = None,
+        timeout: int = 30,
+        scroll_steps: int = 0,
+    ) -> str:
+        """Render via an external Obscura CDP server (engine=obscura).
+
+        The CDP server owns the browser processes; each request opens a fresh
+        page on the shared connected browser. Same load-wait ladder as the
+        Playwright path: domcontentloaded -> optional selector -> capped
+        networkidle (best-effort) -> optional scroll -> page content.
+        """
+        if not self._started or self._cdp_browser is None or self._semaphore is None:
+            raise RuntimeError("Obscura CDP not connected or disabled")
+
+        await self._semaphore.acquire()
+        page = None
+        context = None
+        try:
+            context = await self._cdp_browser.new_context(
+                user_agent=self.user_agent,
+                viewport={"width": 1280, "height": 800},
+            )
+            page = await context.new_page()
+            if self.stealth:
+                await page.add_init_script(STEALTH_INIT_SCRIPT)
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=timeout * 1000,
+            )
+            if wait_for:
+                await page.wait_for_selector(wait_for, timeout=timeout * 1000)
+            else:
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle",
+                        timeout=self.network_idle_timeout * 1000,
+                    )
+                except Exception:  # noqa: BLE001 (networkidle is best-effort)
+                    pass
+            if scroll_steps > 0:
+                await self._scroll_to_bottom(page, scroll_steps)
+            html = await page.content()
+            return html
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._semaphore.release()
+
     async def _scrapling_render(
         self,
         url: str,
         wait_for: Optional[str] = None,
         timeout: int = 30,
+        scroll_steps: int = 0,
     ) -> str:
         """Render via Scrapling StealthyFetcher (single shared session).
 
@@ -270,8 +367,8 @@ class BrowserPool:
                     )
                 except Exception:  # noqa: BLE001 (networkidle is best-effort)
                     pass
-            if self.scroll_steps > 0:
-                await self._scroll_to_bottom(page)
+            if scroll_steps > 0:
+                await self._scroll_to_bottom(page, scroll_steps)
 
         await self._semaphore.acquire()
         try:
@@ -315,6 +412,7 @@ class BrowserPool:
         url: str,
         wait_for: Optional[str] = None,
         timeout: int = 30,
+        scroll_steps: Optional[int] = None,
     ) -> str:
         """Render with the scrapling session that has solve_cloudflare=True.
 
@@ -325,6 +423,7 @@ class BrowserPool:
         if not self._started or self._semaphore is None:
             raise RuntimeError("Browser pool not started or disabled")
         session = await self._get_solver_session()
+        steps = self.scroll_steps if scroll_steps is None else scroll_steps
 
         async def _page_action(page: Any) -> None:
             if self.network_idle_timeout > 0:
@@ -335,8 +434,8 @@ class BrowserPool:
                     )
                 except Exception:  # noqa: BLE001 (networkidle is best-effort)
                     pass
-            if self.scroll_steps > 0:
-                await self._scroll_to_bottom(page)
+            if steps > 0:
+                await self._scroll_to_bottom(page, steps)
 
         await self._semaphore.acquire()
         try:
@@ -352,7 +451,7 @@ class BrowserPool:
         finally:
             self._semaphore.release()
 
-    async def _scroll_to_bottom(self, page: Any) -> None:
+    async def _scroll_to_bottom(self, page: Any, steps: int = 0) -> None:
         """Scroll the page to the bottom to trigger lazy-loaded content.
 
         Comment-heavy sites (YouTube, Reddit) mount comments only when they
@@ -360,12 +459,12 @@ class BrowserPool:
         skips those observers, and even viewport-by-viewport jumps can miss
         them. YouTube in particular only mounts comments during a *smooth*
         (animated) scroll. So we animate to the bottom, let the animation and
-        lazy requests settle, and repeat up to ``scroll_steps`` rounds (pages
-        that grow while scrolling), stopping early when the height stops
-        growing. A short networkidle wait lets the requests finish.
+        lazy requests settle, and repeat up to ``steps`` rounds (pages that
+        grow while scrolling), stopping early when the height stops growing.
+        A short networkidle wait lets the requests finish.
         """
         last_height = -1
-        for _ in range(self.scroll_steps):
+        for _ in range(steps):
             await page.evaluate(
                 "window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'})"
             )
