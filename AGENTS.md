@@ -56,6 +56,14 @@ API: `GET /health`, `POST /search`, `POST /extract`, `POST /admin/cache/purge`.
 - **Markdown output via trafilatura** (`output_format="markdown"`): preserves
   headings, bold, lists, code blocks. Tested against html2text/markdownify/
   readability-lxml: trafilatura markdown is the best cost/benefit.
+- **Extract engine is pluggable via config** (`extract.engine`, default
+  `trafilatura`; per-domain via the `engine` override key; request-level
+  `engine` param is absolute). The `readability` engine runs Mozilla
+  Readability.js inside the page (`page.evaluate`, no Node runtime) and
+  converts the article with markdownify. It exists because trafilatura's
+  main-content heuristic drops non-article blocks (Amazon buybox), and
+  `full_text` only recovers them as plain text. `.amazon.*` uses it by
+  default.
 - **Stealth built in, no extra dependency**: `browser.stealth: true` (default)
   sets `--disable-blink-features=AutomationControlled` + an init script that
   masks `navigator.webdriver`/`chrome`/`languages`/`plugins`, plus a real
@@ -83,8 +91,8 @@ API: `GET /health`, `POST /search`, `POST /extract`, `POST /admin/cache/purge`.
 - `POST /extract` returns a LIST of result dicts per URL, one entry per URL
   (not the envelope): `{url, title, content, raw_content, method}`.
 - A URL that could not be extracted returns `{url, error}`.
-- `method` is one of `static`, `browser`, `browser+solver`, or a document
-  method (pdf/docx/xlsx/pptx/rtf).
+- `method` is one of `static`, `browser`, `browser+solver`, `browser+readability`,
+  or a document method (pdf/docx/xlsx/pptx/rtf).
 
 ## Configuration
 
@@ -107,9 +115,9 @@ Pattern syntax (www-insensitive, case-insensitive):
 | `.amazon.*` | base domain + subdomains, wildcard anchored per label (never substring: does NOT match `buyamazon.com`) |
 | `reddit.com/r/` | EXACT host + path prefix (does NOT match `old.reddit.com/r/`) |
 
-Available overrides: `force_render`, `full_text`, `wait_for`, `url_rewrite`,
-`scroll`, `timeout` (1-120s), `network_idle_timeout` (0-60s),
-`challenge_timeout` (0-120s).
+Available overrides: `force_render`, `full_text`, `engine` ("trafilatura" |
+"readability"), `wait_for`, `url_rewrite`, `scroll`, `timeout` (1-120s),
+`network_idle_timeout` (0-60s), `challenge_timeout` (0-120s).
 
 Precedence: the most specific override wins (longest pattern); request-level
 params (`force_render`/`wait_for` in the call) are ABSOLUTE and beat the
@@ -124,8 +132,8 @@ override.
      boxes inside `<form>`, comments) as boilerplate.
   2. `raw_content = html[:max_content_chars]` (default 100k) truncates large
      pages (a 1.6MB Amazon page keeps the price at position ~272k, cut off).
-  Fix with `full_text: true` in the domain override (uses plain text) or by
-  raising `max_content_chars`.
+  Fix with `engine: readability` in the domain override (Readability.js keeps
+  the buybox and returns markdown) or by raising `max_content_chars`.
 - **`challenge-platform` must NEVER be a challenge marker**: Cloudflare injects
   `/cdn-cgi/challenge-platform/...` into every page it serves, even without an
   active challenge. It caused false "Blocked by anti-bot challenge" on

@@ -42,6 +42,10 @@ extract:
   timeout: 30              # seconds, total per URL
   max_content_chars: 100000 # cap on extracted content size
   only_main_content: true  # strip nav/ads/footer (trafilatura)
+  engine: trafilatura     # extract engine: "trafilatura" (default) or
+                          # "readability" (Readability.js in the browser +
+                          # markdownify; keeps buyboxes/comments that
+                          # trafilatura drops as non-main, as markdown)
   user_agent: "ForageBot/0.1 (+https://github.com/aldemaroc/forage)"  # static fetch
   # browser_user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
                            # browser (Playwright); commented = built-in Chrome desktop UA
@@ -64,6 +68,9 @@ extract:
   #   full_text: bool      -> extract the WHOLE page text instead of main
   #                           content (forums/comment-heavy sites; trafilatura
   #                           drops comments and buyboxes as non-main)
+  #   engine: str          -> per-domain extract engine override:
+  #                           "trafilatura" or "readability" (Readability.js
+  #                           + markdownify, keeps buybox and returns markdown)
   #   wait_for: str        -> default CSS selector to wait before extracting
   #   url_rewrite: str     -> rewrite matching URLs before fetching; format
   #                           "host[/path]" (e.g. "old.reddit.com/r/"), the
@@ -108,7 +115,9 @@ extract:
       timeout: 60
     ".amazon.*":
       force_render: true        # product pages: price arrives via JS after load
-      full_text: true           # keep the buybox (trafilatura drops it)
+      engine: readability       # Readability.js + markdownify: keeps the buybox
+                                # (trafilatura drops it) AND returns structured
+                                # markdown (full_text only gave plain text)
       timeout: 60               # 1.5MB+ DOM with the full buybox
     reddit.com/r/:              # classic UI serves comments server-side
       url_rewrite: "old.reddit.com/r/"

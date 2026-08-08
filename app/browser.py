@@ -9,10 +9,12 @@ idle_timeout, down to min_idle.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import pathlib
 import time
 from collections import deque
-from typing import Any, Deque, Optional
+from typing import Any, Deque, Dict, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,39 @@ CHALLENGE_TITLES = (
     "checking your browser",
     "verifying you are human",
 )
+
+# Mozilla Readability.js (https://github.com/mozilla/readability), vendored at
+# build time. Runs inside the page (page.evaluate) to extract the article DOM
+# from the rendered page, mimicking what Jina Reader does for product pages
+# where trafilatura's main-content heuristic drops the buybox (Amazon).
+_READABILITY_JS = (pathlib.Path(__file__).parent / "readability.js").read_text(
+    encoding="utf-8"
+)
+
+
+def _readability_eval() -> str:
+    """Return a JS IIFE that parses the current document and returns a JSON
+    string with the article title and HTML (or null when Readability finds no
+    article)."""
+    return (
+        "(function() {\n"
+        + _READABILITY_JS
+        + "\nvar _r = new Readability(document).parse();"
+        "\nreturn _r ? JSON.stringify({title: _r.title || '', content: _r.content}) : null;\n})()"
+    )
+
+
+def _parse_readability(raw: Optional[str]) -> Optional[dict]:
+    """Parse the JSON returned by the Readability IIFE into {title, content}."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("content"):
+        return None
+    return {"title": parsed.get("title") or "", "content": parsed["content"]}
 
 
 class BrowserPool:
@@ -229,20 +264,26 @@ class BrowserPool:
         scroll_steps: Optional[int] = None,
         network_idle_timeout: Optional[int] = None,
         challenge_timeout: Optional[int] = None,
-    ) -> str:
+        readability: bool = False,
+    ) -> Union[str, Dict[str, str]]:
         """Render a URL with the configured engine and return the final DOM HTML.
 
         Per-call overrides (used by domain_overrides): ``scroll_steps``,
         ``network_idle_timeout`` and ``challenge_timeout``; None falls back
         to the global browser config.
+
+        When ``readability`` is True, the page is parsed in-browser with
+        Mozilla Readability.js and ``{"title", "content"}`` (article HTML) is
+        returned instead of the full DOM (falls back to the full DOM string
+        when no article is found).
         """
         steps = self.scroll_steps if scroll_steps is None else scroll_steps
         idle_cap = self.network_idle_timeout if network_idle_timeout is None else network_idle_timeout
         chal_cap = self.challenge_timeout if challenge_timeout is None else challenge_timeout
         if self.engine == "scrapling":
-            return await self._scrapling_render(url, wait_for, timeout, steps, idle_cap, chal_cap)
+            return await self._scrapling_render(url, wait_for, timeout, steps, idle_cap, chal_cap, readability)
         if self.engine == "obscura":
-            return await self._cdp_render(url, wait_for, timeout, steps, idle_cap)
+            return await self._cdp_render(url, wait_for, timeout, steps, idle_cap, readability)
         browser = await self.acquire()
         page = None
         try:
@@ -267,6 +308,10 @@ class BrowserPool:
                     pass
             if steps > 0:
                 await self._scroll_to_bottom(page, steps)
+            if readability:
+                article = _parse_readability(await page.evaluate(_readability_eval()))
+                if article:
+                    return article
             html = await page.content()
             return html
         finally:
@@ -284,7 +329,8 @@ class BrowserPool:
         timeout: int = 30,
         scroll_steps: int = 0,
         network_idle_timeout: Optional[int] = None,
-    ) -> str:
+        readability: bool = False,
+    ) -> Union[str, Dict[str, str]]:
         """Render via an external Obscura CDP server (engine=obscura).
 
         The CDP server owns the browser processes; each request opens a fresh
@@ -324,6 +370,10 @@ class BrowserPool:
                     pass
             if scroll_steps > 0:
                 await self._scroll_to_bottom(page, scroll_steps)
+            if readability:
+                article = _parse_readability(await page.evaluate(_readability_eval()))
+                if article:
+                    return article
             html = await page.content()
             return html
         finally:
@@ -347,7 +397,8 @@ class BrowserPool:
         scroll_steps: int = 0,
         network_idle_timeout: Optional[int] = None,
         challenge_timeout: Optional[int] = None,
-    ) -> str:
+        readability: bool = False,
+    ) -> Union[str, Dict[str, str]]:
         """Render via Scrapling StealthyFetcher (single shared session).
 
         networkidle and scrolling are replicated inside a page_action so the
@@ -358,6 +409,8 @@ class BrowserPool:
             raise RuntimeError("Scrapling session not started or disabled")
         idle_cap = self.network_idle_timeout if network_idle_timeout is None else network_idle_timeout
         chal_cap = self.challenge_timeout if challenge_timeout is None else challenge_timeout
+
+        result: dict = {}
 
         async def _page_action(page: Any) -> None:
             # Cloudflare Turnstile non-interactive challenges auto-validate a
@@ -380,6 +433,13 @@ class BrowserPool:
                     pass
             if scroll_steps > 0:
                 await self._scroll_to_bottom(page, scroll_steps)
+            if readability:
+                try:
+                    result["article"] = _parse_readability(
+                        await page.evaluate(_readability_eval())
+                    )
+                except Exception:  # noqa: BLE001
+                    result["article"] = None
 
         await self._semaphore.acquire()
         try:
@@ -389,6 +449,8 @@ class BrowserPool:
                 wait_selector=wait_for or None,
                 page_action=_page_action,
             )
+            if readability and result.get("article"):
+                return result["article"]
             if resp is None or not resp.body:
                 raise RuntimeError(f"Empty response for {url}")
             return resp.body.decode("utf-8", errors="ignore")

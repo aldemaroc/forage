@@ -48,6 +48,7 @@ Bypass per request with the `Cache-Control: no-cache` header; the response heade
 | `timeout` | `30` | Total seconds budget per URL (applies to static fetch and browser render). |
 | `max_content_chars` | `100000` | Cap on extracted content size. |
 | `only_main_content` | `true` | Strip navigation/ads/footer (trafilatura main-content extraction). |
+| `engine` | `trafilatura` | Extract engine: `trafilatura` (default) or `readability`. `readability` runs Mozilla Readability.js inside the browser page (`page.evaluate`, no Node runtime) and converts the article with markdownify. Use it for product/forum pages where trafilatura's main-content heuristic drops the buybox or comments (Amazon). Can also be set per request or per domain override. |
 | `user_agent` | `ForageBot/0.1 (+https://github.com/aldemaroc/forage)` | User-Agent for the **static** fetch (httpx). |
 | `browser_user_agent` | `null` (commented) | User-Agent for the **browser** (Playwright). When unset, a real Chrome desktop UA is used (never a bot UA; it would be a giveaway). |
 | `respect_robots` | `false` | Whether to honor `robots.txt`. Default is **false** (do not respect). |
@@ -55,7 +56,7 @@ Bypass per request with the `Cache-Control: no-cache` header; the response heade
 | `wait_for` | `null` | CSS selector to wait for before extracting (browser mode). |
 | `min_content_chars` | `200` | If static extraction yields less text than this, Forage falls back to the browser. |
 | `raw_content_markdown` | `true` | `true`: `raw_content` mirrors the clean markdown (Firecrawl-style contract; what Hermes' `web_extract_tool` reads first). `false`: `raw_content` keeps the raw HTML. |
-| `domain_overrides` | `{}` | Per-pattern extraction overrides. The YAML key is a pattern (www-insensitive, case-insensitive): `x.com` matches the host or any subdomain; `.x.com` is the same with an explicit leading dot; `amazon.*` is a wildcard on a host label (fnmatch) that matches the host and any subdomain suffix; `reddit.com/r/` requires an exact host plus a path prefix. Supported keys per override: `force_render` (bool), `full_text` (bool), `wait_for` (str), `url_rewrite` (str, format `host[/path]`), `scroll` (bool), `timeout` (int 1-120), `network_idle_timeout` (int 0-60), `challenge_timeout` (int 0-120). Request-level `force_render`/`wait_for`/`timeout` are absolute and override the domain override. |
+| `domain_overrides` | `{}` | Per-pattern extraction overrides. The YAML key is a pattern (www-insensitive, case-insensitive): `x.com` matches the host or any subdomain; `.x.com` is the same with an explicit leading dot; `amazon.*` is a wildcard on a host label (fnmatch) that matches the host and any subdomain suffix; `reddit.com/r/` requires an exact host plus a path prefix. Supported keys per override: `force_render` (bool), `full_text` (bool), `engine` (str: `trafilatura` or `readability`), `wait_for` (str), `url_rewrite` (str, format `host[/path]`), `scroll` (bool), `timeout` (int 1-120), `network_idle_timeout` (int 0-60), `challenge_timeout` (int 0-120). Request-level `force_render`/`wait_for`/`timeout`/`engine` are absolute and override the domain override. |
 
 Example: serve Reddit threads/profiles from the classic UI (comments are server-side there) and keep the Amazon buybox (price arrives via JS; trafilatura drops it as non-main):
 
@@ -64,7 +65,8 @@ extract:
   domain_overrides:
     ".amazon.*":              # all Amazon TLDs + subdomains
       force_render: true      # price arrives via JS after load
-      full_text: true         # keep the buybox (trafilatura drops it)
+      engine: readability     # Readability.js keeps the buybox AND returns
+                              # structured markdown (full_text gives plain text)
     reddit.com/r/:            # subreddits / threads
       url_rewrite: "old.reddit.com/r/"
     reddit.com/u/:            # user profiles (old format)

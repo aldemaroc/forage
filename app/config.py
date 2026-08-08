@@ -43,6 +43,7 @@ DEFAULTS: Dict[str, Any] = {
         "timeout": 30,
         "max_content_chars": 100000,
         "only_main_content": True,
+        "engine": "trafilatura",   # "trafilatura" (default) or "readability" (Readability.js + markdownify)
         "user_agent": "ForageBot/0.1 (+https://github.com/aldemaroc/forage)",
         "browser_user_agent": None,
         "respect_robots": False,
@@ -126,6 +127,7 @@ class DomainOverride:
     pattern: str
     force_render: Optional[bool] = None
     full_text: Optional[bool] = None
+    engine: Optional[str] = None    # "trafilatura" (default) or "readability"
     wait_for: Optional[str] = None
     url_rewrite: Optional[str] = None
     scroll: Optional[bool] = None
@@ -139,6 +141,7 @@ class ExtractConfig:
     timeout: int = 30
     max_content_chars: int = 100000
     only_main_content: bool = True
+    engine: str = "trafilatura"   # "trafilatura" (default) or "readability"
     user_agent: str = "ForageBot/0.1 (+https://github.com/aldemaroc/forage)"
     browser_user_agent: Optional[str] = None
     respect_robots: bool = False
@@ -240,6 +243,10 @@ class ForageConfig:
             raise ValueError(f"browser.engine inválido: {self.browser.engine} (use playwright, patchright, scrapling ou obscura)")
         if self.browser.engine == "obscura" and not self.browser.cdp_url:
             raise ValueError("browser.engine=obscura exige browser.cdp_url (ex.: http://127.0.0.1:9223)")
+        if self.extract.engine not in ("trafilatura", "readability"):
+            raise ValueError(
+                f"extract.engine inválido: {self.extract.engine} (use trafilatura ou readability)"
+            )
         if self.browser.min_idle > self.browser.max_instances and self.browser.max_instances > 0:
             raise ValueError("browser.min_idle não pode exceder browser.max_instances")
         for override in self.extract.domain_overrides:
@@ -261,6 +268,10 @@ class ForageConfig:
             if override.challenge_timeout is not None and not (0 <= override.challenge_timeout <= 120):
                 raise ValueError(
                     f"extract.domain_overrides[{override.pattern}]: challenge_timeout deve estar entre 0 e 120s"
+                )
+            if override.engine is not None and override.engine not in ("trafilatura", "readability"):
+                raise ValueError(
+                    f"extract.domain_overrides[{override.pattern}]: engine deve ser trafilatura ou readability"
                 )
 
 

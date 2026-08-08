@@ -15,11 +15,12 @@ import asyncio
 import fnmatch
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import httpx
 import trafilatura
+from markdownify import markdownify as _markdownify
 
 from .browser import BrowserPool
 from .config import ForageConfig
@@ -413,6 +414,31 @@ def _extract_text(html: str, only_main_content: bool, max_chars: int) -> str:
     return text[:max_chars]
 
 
+def _to_output(
+    html: str,
+    fmt: str,
+    readability: bool,
+    main: bool,
+    max_chars: int,
+    raw_md: bool,
+) -> tuple[str, str]:
+    """Convert the final HTML to the requested output pair (content, raw_content).
+
+    - fmt == "html": raw HTML in both (raw truncated at max_chars).
+    - readability engine: the article HTML (already main-content filtered by
+      Readability.js in the browser) is converted to markdown with markdownify.
+    - default engine: trafilatura markdown (only_main_content) or plain text
+      (full_text override).
+    """
+    if fmt == "html":
+        return html, html[:max_chars]
+    if readability:
+        content = _markdownify(html, heading_style="ATX")
+        return content, (content if raw_md else html[:max_chars])
+    content = _extract_text(html, main, max_chars)
+    return content, (content if raw_md else html[:max_chars])
+
+
 def _scroll_steps_for(config: ForageConfig, scroll: bool) -> int:
     """Effective scroll rounds for a render call.
 
@@ -435,6 +461,7 @@ async def extract_url(
     output_format: str = "markdown",
     only_main_content: bool = True,
     timeout: Optional[int] = None,
+    engine: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Extract a single URL using the hybrid strategy. Hermes-envelope entry.
 
@@ -461,6 +488,14 @@ async def extract_url(
     )
     effective_main = only_main_content and not bool(override and override.full_text)
     effective_scroll = bool(override and override.scroll)
+    # Extract engine: request-level is absolute; then the domain override;
+    # then the global default ("trafilatura").
+    effective_engine = (
+        engine
+        or (override.engine if override is not None else None)
+        or config.extract.engine
+    )
+    effective_readability = effective_engine == "readability"
     effective_timeout = (
         timeout
         or (override.timeout if override is not None else None)
@@ -487,10 +522,11 @@ async def extract_url(
             doc_result["url"] = original_url
             return doc_result
 
-    want_browser = effective_force_render or bool(effective_wait_for)
+    want_browser = effective_force_render or bool(effective_wait_for) or effective_readability
 
-    html: Optional[str] = None
+    html: Optional[Union[str, Dict[str, str]]] = None
     status = 0
+    readability_title: Optional[str] = None
 
     if not want_browser:
         html, status, _ = await fetch_static(config, url)
@@ -515,8 +551,14 @@ async def extract_url(
                 scroll_steps=_scroll_steps_for(config, effective_scroll),
                 network_idle_timeout=effective_idle,
                 challenge_timeout=effective_challenge,
+                readability=effective_readability,
             )
             method = "browser"
+            if effective_readability and isinstance(html, dict):
+                readability_title = html.get("title") or ""
+                html = html.get("content") or ""
+            else:
+                readability_title = None
         except Exception as exc:  # noqa: BLE001
             logger.warning("Browser render failed for %s: %s", url, exc)
             if html is None:
@@ -542,29 +584,28 @@ async def extract_url(
                     scroll_steps=_scroll_steps_for(config, effective_scroll),
                     network_idle_timeout=effective_idle,
                     challenge_timeout=effective_challenge,
+                    readability=effective_readability,
                 )
                 method = "browser"
+                if effective_readability and isinstance(html, dict):
+                    readability_title = html.get("title") or ""
+                    html = html.get("content") or ""
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Browser render failed for %s: %s", url, exc)
 
-    if output_format == "html":
-        content = html
-        raw_content = html[: config.extract.max_content_chars]
-    else:
-        content = _extract_text(html, effective_main, config.extract.max_content_chars)
-        # By default (raw_content_markdown), raw_content mirrors the clean
-        # markdown; matches Firecrawl's contract, which Hermes' web_extract
-        # tool relies on (it reads raw_content first). Disable to keep the
-        # raw HTML in raw_content instead.
-        if config.extract.raw_content_markdown:
-            raw_content = content
-        else:
-            raw_content = html[: config.extract.max_content_chars]
+    content, raw_content = _to_output(
+        html,
+        output_format,
+        effective_readability,
+        effective_main,
+        config.extract.max_content_chars,
+        config.extract.raw_content_markdown,
+    )
 
     if not content:
         return {"url": original_url, "error": "No content extracted"}
 
-    title = _extract_title(html)
+    title = readability_title or _extract_title(html)
     if looks_like_challenge(html, title):
         if config.browser.fallback_solver:
             # Last-resort retry: the scrapling built-in solver handles
@@ -586,12 +627,14 @@ async def extract_url(
                 html = solver_html
                 method = "browser+solver"
                 title = _extract_title(html)
-                if output_format == "html":
-                    content = html
-                    raw_content = html[: config.extract.max_content_chars]
-                else:
-                    content = _extract_text(html, effective_main, config.extract.max_content_chars)
-                    raw_content = content if config.extract.raw_content_markdown else html[: config.extract.max_content_chars]
+                content, raw_content = _to_output(
+                    html,
+                    output_format,
+                    effective_readability,
+                    effective_main,
+                    config.extract.max_content_chars,
+                    config.extract.raw_content_markdown,
+                )
                 if not content:
                     return {"url": original_url, "error": "No content extracted"}
         if looks_like_challenge(html, title):
@@ -602,6 +645,9 @@ async def extract_url(
                 "method": method,
                 "error": "Blocked by anti-bot challenge (Cloudflare or similar)",
             }
+
+    if effective_readability and method == "browser":
+        method = "browser+readability"
 
     result: Dict[str, Any] = {
         "url": original_url,

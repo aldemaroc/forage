@@ -19,7 +19,7 @@ Built specifically for [Hermes Agent](https://hermes-agent.nousresearch.com), bu
 Self-hosted Firecrawl works, but it is a heavy stack: the community edition spins up **six containers** (API, Playwright service, Redis, RabbitMQ, Postgres…). Forage replaces it with a **single container** that does both jobs:
 
 - **`web_search`**: via [SearXNG](https://github.com/searxng/searxng) (a separate lightweight container)
-- **`web_extract`**: hybrid static + browser extraction with three switchable browser engines and anti-bot coverage
+- **`web_extract`**: hybrid static + browser extraction with three switchable browser engines, two switchable extract engines and anti-bot coverage
 
 It was developed as the extract/search backend for Hermes Agent and ships with a ready-made Hermes plugin (`WebSearchProvider`), but the REST API is generic: any application that can speak HTTP can use it.
 
@@ -28,8 +28,9 @@ It was developed as the extract/search backend for Hermes Agent and ships with a
 - **Single Docker container**: FastAPI + Chromium (via Playwright, Patchright or Scrapling) + httpx/trafilatura
 - **Hybrid extraction**: static HTTP first (fast, cheap), automatic browser fallback when the page needs JS or is anti-bot protected
 - **Three browser engines** (`browser.engine`): `playwright` (default), `patchright` (anti-detection fork) and `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass)
+- **Two extract engines** (`extract.engine`, per-domain or per request): `trafilatura` (default, main-content markdown) and `readability` (Mozilla Readability.js in the browser + markdownify, keeps buyboxes/comments that trafilatura drops as non-main). Amazon product pages use `readability` by default
 - **Anti-bot fallback** (`browser.fallback_solver`): if any engine hits a challenge, Forage retries the page with the Scrapling built-in solver as a last resort
-- **Structured markdown output**: extraction is returned as real markdown (headings, bold, lists, code blocks) via trafilatura's markdown format
+- **Structured markdown output**: extraction is returned as real markdown (headings, bold, lists, code blocks) via trafilatura's markdown format or the Readability.js + markdownify engine
 - **Basic stealth**: hides automation signals from Cloudflare-class protections (configurable, on by default)
 - **In-memory TTL cache** with a master switch and per-operation toggles (search 5 min, extract off by default)
 - **Optional Bearer API-key auth** (constant-time comparison, keys via env)
@@ -50,7 +51,8 @@ FORAGE (single container, :3672)
    ├── FastAPI
    ├── httpx + trafilatura  → static extraction (markdown output)
    ├── Chromium             → JS rendering via playwright | patchright | scrapling
-   │                          (in-process pool, stealth, anti-bot solver fallback)
+   │                          (in-process pool, stealth, anti-bot solver fallback,
+   │                           in-browser Readability.js for the "readability" engine)
    └── search               → SearXNG (shared docker network)
 ```
 

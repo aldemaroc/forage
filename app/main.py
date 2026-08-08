@@ -81,6 +81,7 @@ class ExtractRequest(BaseModel):
     force_render: bool = False
     wait_for: Optional[str] = Field(default=None, max_length=200)
     timeout: Optional[int] = Field(default=None, ge=1, le=120)
+    engine: Optional[str] = Field(default=None, pattern="^(trafilatura|readability)$")
 
 
 def _search_cache_key(req: SearchRequest) -> str:
@@ -88,8 +89,8 @@ def _search_cache_key(req: SearchRequest) -> str:
     return f"search:{req.query}|{req.limit}|{req.language or ''}|{engines}"
 
 
-def _extract_cache_key(urls: List[str], force_render: bool, wait_for: Optional[str], fmt: str) -> str:
-    return f"extract:{','.join(urls)}|{force_render}|{wait_for or ''}|{fmt}"
+def _extract_cache_key(urls: List[str], force_render: bool, wait_for: Optional[str], fmt: str, engine: Optional[str]) -> str:
+    return f"extract:{','.join(urls)}|{force_render}|{wait_for or ''}|{fmt}|{engine or ''}"
 
 
 @app.get("/health")
@@ -166,7 +167,7 @@ async def extract(
         elif "raw_html" in req.formats:
             fmt = "html"
 
-    key = _extract_cache_key(req.urls, req.force_render, req.wait_for, fmt)
+    key = _extract_cache_key(req.urls, req.force_render, req.wait_for, fmt, req.engine)
     if cache_enabled:
         cached = extract_cache.get(key)
         if cached is not None:
@@ -183,6 +184,7 @@ async def extract(
                 output_format=fmt,
                 only_main_content=req.only_main_content,
                 timeout=req.timeout,
+                engine=req.engine,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Extract failed for %s", url)

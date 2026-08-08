@@ -3,6 +3,7 @@ uvicorn[standard]>=0.30
 PyYAML>=6.0
 httpx>=0.27
 trafilatura>=1.8
+markdownify>=1.0   # markdown converter for the "readability" extract engine
 playwright>=1.45
 patchright>=1.45      # optional engine (browser.engine: patchright), undetected Playwright fork
 scrapling[fetchers]>=0.4  # optional engine (browser.engine: scrapling), anti-bot fetcher (Cloudflare Turnstile)
