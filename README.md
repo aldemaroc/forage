@@ -80,7 +80,7 @@ cp config.example.yaml config.yaml   # behavior: port, cache, browser, ...
 ```bash
 docker compose up -d --build
 curl http://localhost:3672/health
-# → {"status":"ok","service":"forage","version":"0.8.0",...}
+# → {"status":"ok","service":"forage","version":"0.8.1",...}
 ```
 
 4. **Try it**

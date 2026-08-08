@@ -4,7 +4,8 @@ Decision flow (config-driven):
   1. domain override force_render | request force_render | wait_for -> browser
   2. static fetch (httpx)
   3. HTTP 403/429                                          -> browser
-  4. looks_like_spa(html) or trafilatura text < min_content_chars -> browser
+  4. needs_browser_render(html, text): SPA markers | content density |
+     empty <main> | text < min_content_chars -> browser
   5. otherwise deliver the static result
 """
 
@@ -42,11 +43,78 @@ SPA_MARKERS = [
     'id="svelte"',
     "data-reactroot",
     "ng-app=",          # attribute form only; bare "ng-app" matches "shopping-app" in prose
+    "ng-version",       # Angular runtime
     "__NEXT_DATA__",
     "__NUXT__",
+    "__INITIAL_STATE__",
+    "__APOLLO_STATE__",
+    "data-svelte",      # Svelte compiler marker
+    'id="__gatsby"',    # Gatsby
     "ytInitialData",  # YouTube (present in the static HTML shell)
     "ytcfg",          # YouTube config blob
 ]
+
+# A page whose <main> exists but is (nearly) empty in the static HTML is
+# almost certainly rendered by JS: the container is a placeholder and the
+# real content only mounts client-side. Only fires when <main> is present,
+# so pages that never use <main> are untouched.
+EMPTY_MAIN_CHARS = 100
+
+
+def looks_like_spa(html: str) -> bool:
+    low = html.lower()
+    return any(marker in low for marker in SPA_MARKERS)
+
+
+def _main_text_chars(html: str) -> Optional[int]:
+    """Return the visible text length inside <main>...</main>, or None when
+    the page has no <main> element."""
+    match = re.search(r"<main[^>]*>(.*?)</main>", html, flags=re.S | re.I)
+    if not match:
+        return None
+    inner = match.group(1)
+    inner = re.sub(r"<script[^>]*>.*?</script>", " ", inner, flags=re.S | re.I)
+    inner = re.sub(r"<style[^>]*>.*?</style>", " ", inner, flags=re.S | re.I)
+    inner = re.sub(r"<[^>]+>", " ", inner)
+    return len(re.sub(r"\s+", " ", inner).strip())
+
+
+def needs_browser_render(
+    html: str,
+    text: str,
+    min_content_chars: int,
+) -> Tuple[bool, str]:
+    """Decide whether a statically-fetched page needs browser rendering.
+
+    Multiple independent checks; if ANY of them fires, the page goes to the
+    browser:
+      1. Framework markers in the static HTML (React/Next/Vue/Angular/Svelte/
+         Gatsby/YouTube shells).
+      2. Content density: a large HTML document (>= 50 KB) whose extracted
+         text is tiny relative to its size (<= max(500, 1% of HTML)). Static
+         pages have a much higher text/HTML ratio; a big shell with almost no
+         text means the content is mounted by JS.
+      3. Empty <main> container: <main> exists in the static HTML but holds
+         virtually no text (<= 100 chars), so it is a placeholder awaiting
+         client-side rendering.
+      4. Extracted text below the configured absolute minimum.
+
+    Returns (needs_render, reason) where reason describes which check fired.
+    """
+    if looks_like_spa(html):
+        return True, "SPA markers in static HTML"
+    html_len = len(html)
+    if html_len >= 50_000 and len(text) <= max(500, html_len // 100):
+        return True, (
+            f"content density too low ({len(text)} chars of text "
+            f"in {html_len} chars of HTML)"
+        )
+    main_chars = _main_text_chars(html)
+    if main_chars is not None and main_chars <= EMPTY_MAIN_CHARS:
+        return True, f"<main> container empty in static HTML ({main_chars} chars)"
+    if len(text) < min_content_chars:
+        return True, f"low content ({len(text)} chars < min {min_content_chars})"
+    return False, ""
 
 
 def _domain(url: str) -> str:
@@ -161,11 +229,6 @@ def rewrite_url(url: str, override: Optional[Any]) -> str:
     if parsed.fragment:
         new_url += "#" + parsed.fragment
     return new_url
-
-
-def looks_like_spa(html: str) -> bool:
-    low = html.lower()
-    return any(marker in low for marker in SPA_MARKERS)
 
 
 CHALLENGE_TITLES = [
@@ -466,8 +529,11 @@ async def extract_url(
     # Hybrid analysis on the static HTML (only relevant when not forced to browser)
     if not want_browser:
         text = _extract_text(html, effective_main, config.extract.max_content_chars)
-        if looks_like_spa(html) or len(text) < config.extract.min_content_chars:
-            logger.info("%s -> low content (%d chars), falling back to browser", url, len(text))
+        needs_render, render_reason = needs_browser_render(
+            html, text, config.extract.min_content_chars
+        )
+        if needs_render:
+            logger.info("%s -> %s, falling back to browser", url, render_reason)
             try:
                 html = await pool.render(
                     url,
