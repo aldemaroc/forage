@@ -24,10 +24,8 @@ cache:
     enabled: true          # cache search results
     ttl: 300               # seconds (5 min); protects SearXNG engines from anti-bot
   extract:
-    enabled: false         # off by default: extraction is always fresh
-    ttl: 3600              # seconds (1 h); pre-defined, used when enabled
-                           # (e.g. a short TTL like 120s gives fast repeat
-                           # extraction with bounded staleness)
+    enabled: true          # short TTL: fast repeat extraction, bounded staleness
+    ttl: 60                # seconds (1 min)
 
 # --- Search (SearXNG) ----------------------------------------
 # Point this at your SearXNG instance. See docs/SEARXNG.md for setup.
