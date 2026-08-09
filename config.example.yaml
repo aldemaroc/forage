@@ -42,10 +42,11 @@ extract:
   timeout: 30              # seconds, total per URL
   max_content_chars: 100000 # cap on extracted content size
   only_main_content: true  # strip nav/ads/footer (trafilatura)
-  engine: trafilatura     # extract engine: "trafilatura" (default) or
-                          # "readability" (Readability.js in the browser +
-                          # markdownify; keeps buyboxes/comments that
-                          # trafilatura drops as non-main, as markdown)
+  engine: readability     # extract engine: "readability" (default; Readability.js in the
+                          # browser + markdownify; keeps buyboxes/comments that
+                          # trafilatura drops as non-main, as markdown) or "trafilatura".
+                          # Applies ONLY to browser renders: the static path always
+                          # uses httpx + trafilatura.
   user_agent: "ForageBot/0.1 (+https://github.com/aldemaroc/forage)"  # static fetch
   # browser_user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
                            # browser (Playwright); commented = built-in Chrome desktop UA
@@ -107,6 +108,7 @@ extract:
       force_render: true
       scroll: true              # comments mount on scroll
       network_idle_timeout: 10  # slow hydration (comments/recommendations)
+      engine: readability       # benchmark 2026-08-08: traf error in browser; readability ok (15.7s)
       timeout: 60
     youtu.be:
       force_render: true
@@ -119,6 +121,34 @@ extract:
                                 # (trafilatura drops it) AND returns structured
                                 # markdown (full_text only gave plain text)
       timeout: 60               # 1.5MB+ DOM with the full buybox
+    # ---- readability via benchmark 2026-08-08 (trafilatura failed info/access) ----
+    bestbuy.com:
+      engine: readability       # traf: timeout 60s; readability ok (33.4s)
+      timeout: 60
+    bloomberg.com:
+      engine: readability       # traf: timeout 60s; readability ok (23.6s)
+      timeout: 60
+    marketwatch.com:
+      engine: readability       # traf: ok but no price (384c); readability has price (27k)
+    yahoo.com:
+      engine: readability       # traf: quote page became an article without quotes; readability returns full quotes (benchmark 09/08)
+    openai.com:
+      engine: readability       # traf: /news/ became "category+date" without titles (cards treated as boilerplate); readability keeps the cards (09/08)
+    playstation.com:
+      engine: readability       # traf: ok but no price (13k); readability has price (12k)
+    coursera.org:
+      engine: readability       # traf: timeout 60s; readability ok (40.9s)
+      timeout: 60
+    udemy.com:
+      engine: readability       # traf: timeout 60s; readability ok (7.2s)
+    lyft.com:
+      engine: readability       # traf: timeout 60s; readability ok (4.9s)
+    docs.aws.amazon.com:
+      engine: readability       # traf: timeout 60s; readability ok (6.6s)
+    react.dev:
+      engine: readability       # traf: timeout 60s; readability ok (4.4s)
+    git-scm.com:
+      engine: readability       # traf: timeout 60s; readability ok (1.8s)
     reddit.com/r/:              # classic UI serves comments server-side
       url_rewrite: "old.reddit.com/r/"
     reddit.com/u/:
@@ -149,9 +179,10 @@ extract:
 
 # --- Browser pool (Playwright/Chromium, in-process) ----------
 browser:
-  engine: playwright       # "playwright" (default), "patchright" (anti-detection fork,
-                           # same API) or "scrapling" (StealthyFetcher: fingerprint
-                           # impersonation + Cloudflare Turnstile bypass)
+  engine: scrapling        # "scrapling" (default; StealthyFetcher: fingerprint
+                           # impersonation + Cloudflare Turnstile bypass, strongest anti-bot),
+                           # "playwright" (vanilla), "patchright" (anti-detection fork, same
+                           # API) or "obscura" (experimental Rust/V8 via CDP)
   min_idle: 1              # browsers kept warm at boot (standby; scrapling keeps a session)
   max_instances: 5         # pool ceiling (parallel URL extraction)
   idle_timeout: 60         # seconds idle before an instance is closed

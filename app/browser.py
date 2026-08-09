@@ -75,6 +75,12 @@ def _parse_readability(raw: Optional[str]) -> Optional[dict]:
     return {"title": parsed.get("title") or "", "content": parsed["content"]}
 
 
+def _is_dead_browser(exc: BaseException) -> bool:
+    """True when the scrapling browser died (session must be recreated)."""
+    msg = str(exc).lower()
+    return "has been closed" in msg or "target page" in msg or "browser has been closed" in msg
+
+
 class BrowserPool:
     """In-process browser pool for Forage.
 
@@ -117,6 +123,7 @@ class BrowserPool:
         self._scrapling_session: Optional[Any] = None
         self._solver_session: Optional[Any] = None  # lazy; scrapling session with solve_cloudflare=True (last-resort retry)
         self._solver_lock = asyncio.Lock()  # guards lazy solver session creation (any engine)
+        self._session_lock = asyncio.Lock()  # guards scrapling session recreation when it dies
         self._cleanup_task: Optional[asyncio.Task] = None
         self._started = False
 
@@ -389,6 +396,34 @@ class BrowserPool:
                     pass
             self._semaphore.release()
 
+    async def _restart_scrapling_session(self) -> None:
+        """Recreate the scrapling session after its browser died.
+
+        Under heavy load the StealthyFetcher's internal browser can be closed
+        (crash / idle / resource pressure); every subsequent fetch then fails
+        with "Target page, context or browser has been closed". Recreate the
+        session once (serialized) so the pool heals itself.
+        """
+        async with self._session_lock:
+            if self._scrapling_session is not None:
+                try:
+                    await self._scrapling_session.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._scrapling_session = None
+            from scrapling.fetchers import AsyncStealthySession
+
+            self._scrapling_session = AsyncStealthySession(
+                headless=self.headless,
+                network_idle=False,
+                timeout=self.launch_timeout * 1000,
+                max_pages=max(1, self.max_instances),
+                solve_cloudflare=self.solve_cloudflare,
+                useragent=self.user_agent,
+            )
+            await self._scrapling_session.start()
+            logger.warning("Scrapling session recreated after browser death")
+
     async def _scrapling_render(
         self,
         url: str,
@@ -443,12 +478,26 @@ class BrowserPool:
 
         await self._semaphore.acquire()
         try:
-            resp = await self._scrapling_session.fetch(
-                url,
-                timeout=timeout * 1000,
-                wait_selector=wait_for or None,
-                page_action=_page_action,
-            )
+            try:
+                resp = await self._scrapling_session.fetch(
+                    url,
+                    timeout=timeout * 1000,
+                    wait_selector=wait_for or None,
+                    page_action=_page_action,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if _is_dead_browser(exc):
+                    # The session's browser died (heavy load). Recreate the
+                    # session and retry once instead of failing the request.
+                    await self._restart_scrapling_session()
+                    resp = await self._scrapling_session.fetch(
+                        url,
+                        timeout=timeout * 1000,
+                        wait_selector=wait_for or None,
+                        page_action=_page_action,
+                    )
+                else:
+                    raise
             if readability and result.get("article"):
                 return result["article"]
             if resp is None or not resp.body:

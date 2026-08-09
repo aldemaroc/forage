@@ -522,11 +522,16 @@ async def extract_url(
             doc_result["url"] = original_url
             return doc_result
 
-    want_browser = effective_force_render or bool(effective_wait_for) or effective_readability
+    # The extract engine (trafilatura vs readability) applies ONLY to browser
+    # renders. It must NOT force the browser: pages that extract fine with
+    # plain HTTP + trafilatura stay on the static path. The browser is only
+    # used when an override/request demands it or the hybrid check needs it.
+    want_browser = effective_force_render or bool(effective_wait_for)
 
     html: Optional[Union[str, Dict[str, str]]] = None
     status = 0
     readability_title: Optional[str] = None
+    readability_rendered = False
 
     if not want_browser:
         html, status, _ = await fetch_static(config, url)
@@ -555,6 +560,7 @@ async def extract_url(
             )
             method = "browser"
             if effective_readability and isinstance(html, dict):
+                readability_rendered = True
                 readability_title = html.get("title") or ""
                 html = html.get("content") or ""
             else:
@@ -588,6 +594,7 @@ async def extract_url(
                 )
                 method = "browser"
                 if effective_readability and isinstance(html, dict):
+                    readability_rendered = True
                     readability_title = html.get("title") or ""
                     html = html.get("content") or ""
             except Exception as exc:  # noqa: BLE001
@@ -596,7 +603,7 @@ async def extract_url(
     content, raw_content = _to_output(
         html,
         output_format,
-        effective_readability,
+        readability_rendered,
         effective_main,
         config.extract.max_content_chars,
         config.extract.raw_content_markdown,
@@ -630,7 +637,7 @@ async def extract_url(
                 content, raw_content = _to_output(
                     html,
                     output_format,
-                    effective_readability,
+                    readability_rendered,
                     effective_main,
                     config.extract.max_content_chars,
                     config.extract.raw_content_markdown,
@@ -646,7 +653,7 @@ async def extract_url(
                 "error": "Blocked by anti-bot challenge (Cloudflare or similar)",
             }
 
-    if effective_readability and method == "browser":
+    if readability_rendered and method == "browser":
         method = "browser+readability"
 
     result: Dict[str, Any] = {
