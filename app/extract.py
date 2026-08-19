@@ -361,16 +361,29 @@ async def _extract_document(
 async def fetch_static(
     config: ForageConfig,
     url: str,
-) -> Tuple[Optional[str], int, str]:
-    """Fetch URL with plain HTTP. Returns (html, status, final_url)."""
+) -> Tuple[Optional[str], int, str, str]:
+    """Fetch URL with plain HTTP. Returns (html, status, final_url, content_type).
+
+    When ``config.extract.prefer_markdown`` is true, the request negotiates
+    ``Accept: text/markdown`` first. A server that implements markdown
+    negotiation (e.g. via .htaccess / Vary: Accept) answers with
+    ``text/markdown``; the caller then uses the body directly as markdown
+    without running trafilatura. Servers without negotiation ignore the
+    Accept and return ``text/html``, so the normal hybrid flow continues.
+    """
+    accept = (
+        "text/markdown,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        if config.extract.prefer_markdown
+        else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    )
     headers = {
         "User-Agent": config.extract.user_agent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": accept,
     }
     async with httpx.AsyncClient(follow_redirects=True, timeout=config.extract.timeout) as client:
         robots_error = await _check_robots(client, config, url)
         if robots_error:
-            return None, 0, url  # caller treats 0 as blocked-by-robots
+            return None, 0, url, ""  # caller treats 0 as blocked-by-robots
         for attempt in range(RETRY_ATTEMPTS):
             try:
                 resp = await client.get(url, headers=headers)
@@ -381,15 +394,16 @@ async def fetch_static(
                     )
                     await asyncio.sleep(RETRY_DELAY)
                     continue
-                return resp.text, resp.status_code, str(resp.url)
+                content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                return resp.text, resp.status_code, str(resp.url), content_type
             except httpx.RequestError as exc:
                 if attempt < RETRY_ATTEMPTS - 1:
                     logger.info("%s -> request error, retrying in %.1fs: %s", url, RETRY_DELAY, exc)
                     await asyncio.sleep(RETRY_DELAY)
                     continue
                 logger.warning("Static fetch failed for %s: %s", url, exc)
-                return None, 0, url
-        return None, 0, url
+                return None, 0, url, ""
+        return None, 0, url, ""
 
 
 def _plain_text(html: str) -> str:
@@ -530,11 +544,13 @@ async def extract_url(
 
     html: Optional[Union[str, Dict[str, str]]] = None
     status = 0
+    content_type = ""
+    native_markdown = False
     readability_title: Optional[str] = None
     readability_rendered = False
 
     if not want_browser:
-        html, status, _ = await fetch_static(config, url)
+        html, status, _, content_type = await fetch_static(config, url)
         if status == 0:
             # network error or robots-blocked; browser rarely helps, fail clean
             return {"url": original_url, "error": "Failed to fetch URL (network error or robots.txt)"}
@@ -546,6 +562,32 @@ async def extract_url(
             # 200 with a challenge page. Give the browser a shot before failing.
             logger.info("%s -> static anti-bot challenge page, falling back to browser", url)
             want_browser = True
+        elif content_type == "text/markdown":
+            # The server implements markdown negotiation and served native
+            # markdown. Use it directly, skipping trafilatura conversion.
+            native_markdown = True
+            logger.info("%s -> native markdown served (text/markdown)", url)
+
+    if native_markdown:
+        # The body is already markdown, not HTML: trafilatura, title
+        # extraction and the challenge check (all HTML-based) do not apply.
+        # Truncate to the configured cap and mirror raw_content per the
+        # raw_content_markdown contract (Hermes reads raw_content first).
+        md = html if isinstance(html, str) else ""
+        content = md[: config.extract.max_content_chars]
+        raw_content = content if config.extract.raw_content_markdown else ""
+        if not content:
+            return {"url": original_url, "error": "No content extracted"}
+        result: Dict[str, Any] = {
+            "url": original_url,
+            "title": "",
+            "content": content,
+            "raw_content": raw_content,
+            "method": "markdown",
+        }
+        if url != original_url:
+            result["rewritten_url"] = url
+        return result
 
     if want_browser:
         try:

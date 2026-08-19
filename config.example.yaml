@@ -53,8 +53,11 @@ extract:
   wait_for: null           # optional CSS selector to wait before extracting
   min_content_chars: 200   # static result below this length -> browser fallback
   raw_content_markdown: true
-                           # true: raw_content mirrors clean markdown (Firecrawl-style contract)
-                           # false: raw_content keeps the raw HTML
+                          # true: raw_content mirrors clean markdown (Firecrawl-style contract)
+                          # false: raw_content keeps the raw HTML
+  prefer_markdown: true   # negotiate Accept: text/markdown; when the server serves native
+                          # markdown (e.g. via .htaccess / Vary: Accept), use it directly
+                          # instead of converting HTML with trafilatura (method: "markdown")
   # domain_overrides: per-pattern extraction overrides. The YAML key is a
   # pattern (www-insensitive, case-insensitive):
   #   "x.com"            -> host or any subdomain

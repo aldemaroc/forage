@@ -51,6 +51,7 @@ DEFAULTS: Dict[str, Any] = {
         "wait_for": None,
         "min_content_chars": 200,
         "raw_content_markdown": True,
+        "prefer_markdown": True,   # negotiate Accept: text/markdown; use native markdown when the server serves it
         "domain_overrides": {},
     },
     "browser": {
@@ -149,6 +150,7 @@ class ExtractConfig:
     wait_for: Optional[str] = None
     min_content_chars: int = 200
     raw_content_markdown: bool = True
+    prefer_markdown: bool = True
     domain_overrides: tuple = ()
 
 
