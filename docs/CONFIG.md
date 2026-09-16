@@ -36,10 +36,12 @@ Bypass per request with the `Cache-Control: no-cache` header; the response heade
 
 | Key | Default | Description |
 |---|---|---|
-| `searxng_url` | `http://searxng:8080` | Base URL of the SearXNG instance. On Docker, use the service name on the shared network (see docs/SEARXNG.md). |
-| `default_lang` | `pt-BR` | Language passed to SearXNG. |
-| `engines` | `[google, bing, brave, startpage]` | Optional engine filter sent to SearXNG. |
-| `timeout` | `15` | Timeout in seconds per search request. |
+| `searxng_url` | `http://searxng:8080` | Base URL of the SearXNG instance. On Docker, use the service name on the shared network (see docs/SEARXNG.md). Only used when `provider: searxng`. |
+| `default_lang` | `pt-BR` | Language passed to SearXNG / used as `hl`/`setlang` on the SERP URLs (provider=forage). |
+| `engines` | `[google, bing, brave, startpage]` | Engine list. With `provider: searxng` it is the SearXNG engine filter. With `provider: forage` it is the ordered list of Forage's own SERP engines (valid: `google`, `bing`, `yahoo`, `duckduckgo` / alias `ddg`). Order matters: the first engine runs alone; the rest are queried only when it fails or the limit is not met, and then in parallel. |
+| `timeout` | `15` | Timeout in seconds per search request (provider=searxng). |
+| `provider` | `searxng` | Search backend. `searxng` aggregates through the SearXNG instance; `forage` uses Forage's own SERP engines (browser render + DOM parse per engine, no SearXNG needed). Each engine's result is classified `ok` / `no_results` / `error` (challenge, timeout, http, network or parse), so a CAPTCHA page is never mistaken for an empty answer and vice versa. |
+| `serp_timeout` | `20` | Seconds per SERP render (provider=forage). |
 
 ## `extract`
 
@@ -98,7 +100,9 @@ otherwise                                                 → static result
 
 | Key | Default | Description |
 |---|---|---|
-| `engine` | `playwright` | Browser engine: `playwright` (default), `patchright` (anti-detection fork of Playwright, same API) or `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass). Switching engine only needs a config change and `docker compose restart`. |
+| `engine` | `playwright` | Browser engine: `playwright` (default), `patchright` (anti-detection fork of Playwright, same API), `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass) or `chrome-local` (the host's real desktop Chrome via CDP, used to pass anti-bot that blocks every headless browser, e.g. Google's "unusual traffic" challenge). Switching engine only needs a config change and `docker compose restart`. |
+| `cdp_url` | `""` | CDP endpoint for `engine: chrome-local` (or the experimental `obscura`). For the host Chrome it is `http://172.20.0.1:9222` (the Docker gateway, see `docs/CHROME_LOCAL.md`). |
+| `search_engine_overrides` | `{}` | Provider=forage only. Maps a search engine id (`google`, `bing`, `yahoo`, `duckduckgo`) to a browser engine id or an **ordered list** used as a fallback chain: if the first browser hits an anti-bot challenge / error, the next one is tried. Example `google: [scrapling, chrome-local]` renders Google with scrapling first and falls back to the host Chrome when Google shows a CAPTCHA. |
 | `min_idle` | `1` | Browsers kept warm at boot (standby). `0` = lazy (launch on demand). |
 | `max_instances` | `5` | Pool ceiling; also the browser concurrency bound for parallel URL extraction. |
 | `idle_timeout` | `60` | Seconds an idle instance stays alive before it is closed. |

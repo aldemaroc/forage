@@ -18,7 +18,7 @@ Built specifically for [Hermes Agent](https://hermes-agent.nousresearch.com), bu
 
 Self-hosted Firecrawl works, but it is a heavy stack: the community edition spins up **six containers** (API, Playwright service, Redis, RabbitMQ, Postgres…). Forage replaces it with a **single container** that does both jobs:
 
-- **`web_search`**: via [SearXNG](https://github.com/searxng/searxng) (a separate lightweight container)
+- **`web_search`**: via [SearXNG](https://github.com/searxng/searxng) (a separate lightweight container) **or** Forage's own SERP engines (browser render + per-engine DOM parse of Google/Bing/Yahoo/DuckDuckGo, no SearXNG needed, see `search.provider`)
 - **`web_extract`**: hybrid static + browser extraction with three switchable browser engines, two switchable extract engines and anti-bot coverage
 
 It was developed as the extract/search backend for Hermes Agent and ships with a ready-made Hermes plugin (`WebSearchProvider`), but the REST API is generic: any application that can speak HTTP can use it.
@@ -27,7 +27,8 @@ It was developed as the extract/search backend for Hermes Agent and ships with a
 
 - **Single Docker container**: FastAPI + Chromium (via Playwright, Patchright or Scrapling) + httpx/trafilatura
 - **Hybrid extraction**: static HTTP first (fast, cheap), automatic browser fallback when the page needs JS or is anti-bot protected
-- **Three browser engines** (`browser.engine`): `playwright` (default), `patchright` (anti-detection fork) and `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass)
+- **Four browser engines** (`browser.engine`): `playwright` (default), `patchright` (anti-detection fork), `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass) and `chrome-local` (the host's real desktop Chrome over CDP, for anti-bot that blocks every headless browser - see [docs/CHROME_LOCAL.md](docs/CHROME_LOCAL.md))
+- **Own SERP search backend** (`search.provider: forage`): renders the search engine pages through the browser pool and parses each engine's DOM (BeautifulSoup), with ordered engines, automatic fallback on failure (never mistake a CAPTCHA for an empty answer), and parallel fan-out when more results than one engine offers are needed. Search engines can map to per-engine browser chains, e.g. `google: [scrapling, chrome-local]`
 - **Two extract engines** (`extract.engine`, per-domain or per request): `trafilatura` (default, main-content markdown) and `readability` (Mozilla Readability.js in the browser + markdownify, keeps buyboxes/comments that trafilatura drops as non-main). Amazon product pages use `readability` by default
 - **Anti-bot fallback** (`browser.fallback_solver`): if any engine hits a challenge, Forage retries the page with the Scrapling built-in solver as a last resort
 - **Structured markdown output**: extraction is returned as real markdown (headings, bold, lists, code blocks) via trafilatura's markdown format or the Readability.js + markdownify engine

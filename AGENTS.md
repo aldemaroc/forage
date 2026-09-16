@@ -207,6 +207,7 @@ content >= 100 chars, non-empty title).
 
 - `README.md` — what it is, quickstart, API reference
 - `docs/CONFIG.md` — every config key
+- `docs/CHROME_LOCAL.md` — host desktop Chrome engine (chrome-local) setup and pitfalls
 - `docs/SEARXNG.md` — SearXNG install + docker network pitfalls
 - `docs/HERMES.md` — integration with the Hermes agent
 - `docs/BENCHMARK.md` — engine comparison tables

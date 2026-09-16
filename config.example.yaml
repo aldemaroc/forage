@@ -32,8 +32,21 @@ cache:
 search:
   searxng_url: http://searxng:8080   # service name on the shared docker network
   default_lang: pt-BR     # language passed to SearXNG
-  engines: [google, bing, brave, startpage]  # optional engine filter
-  timeout: 15              # seconds per search
+  # Which search backend to use:
+  #   "searxng" (default): aggregates through the SearXNG instance above
+  #   "forage": Forage's own SERP engines (browser render + DOM parse),
+  #             no SearXNG needed. Order matters: engines run in this order,
+  #             the first one alone, extra engines in parallel when needed.
+  provider: searxng
+  # provider=forage: list of SERP engines, in order of preference.
+  # Valid: google, bing, yahoo, duckduckgo (alias: ddg).
+  # A failing engine is skipped; the next engine covers the shortfall.
+  # To enable the own browsers engines use:
+  #   provider: forage
+  #   engines: [google, bing, yahoo]
+  engines: [google, bing, brave, startpage]
+  timeout: 15              # seconds per search (provider=searxng)
+  serp_timeout: 20         # seconds per SERP render (provider=forage)
 
 # --- Extract ------------------------------------------------
 extract:
@@ -183,7 +196,15 @@ browser:
   engine: scrapling        # "scrapling" (default; StealthyFetcher: fingerprint
                            # impersonation + Cloudflare Turnstile bypass, strongest anti-bot),
                            # "playwright" (vanilla), "patchright" (anti-detection fork, same
-                           # API) or "obscura" (experimental Rust/V8 via CDP)
+                           # API), "obscura" (experimental Rust/V8 via CDP) or
+                           # "chrome-local" (host desktop Chrome over CDP; see
+                           # docs/CHROME_LOCAL.md for the host relay setup)
+  # cdp_url: "http://172.20.0.1:9222"   # required for engine=chrome-local (or obscura)
+  # Per-search-engine browser overrides (provider=forage only). Map a search
+  # engine to a browser engine OR an ordered fallback chain (list): if the
+  # first browser hits an anti-bot challenge, the next one is tried.
+  # search_engine_overrides:
+  #   google: [scrapling, chrome-local]   # scrapling first; host Chrome as fallback
   min_idle: 1              # browsers kept warm at boot (standby; scrapling keeps a session)
   max_instances: 5         # pool ceiling (parallel URL extraction)
   idle_timeout: 60         # seconds idle before an instance is closed

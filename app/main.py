@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from dataclasses import replace
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -22,6 +23,7 @@ from .cache import TTLCache
 from .config import load_config
 from .extract import extract_url
 from .searxng import search_searxng
+from .serp import search_forage
 
 config = load_config()
 
@@ -33,7 +35,54 @@ logger = logging.getLogger("forage")
 
 search_cache = TTLCache(max_entries=config.cache.max_entries)
 extract_cache = TTLCache(max_entries=config.cache.max_entries)
-browser_pool = BrowserPool(config.browser, user_agent=config.extract.browser_user_agent)
+
+# One BrowserPool per distinct browser engine that will be used. The default
+# pool matches browser.engine; extra pools are created for the engines named
+# in browser.search_engine_overrides (provider=forage). Each pool keeps its
+# own Playwright launch / Scrapling session, so switching engines per search
+# engine is just a dict lookup.
+def _make_pools() -> Dict[str, BrowserPool]:
+    engines_needed = {config.browser.engine}
+    for chain in config.browser.search_engine_overrides.values():
+        engines_needed.update(chain if isinstance(chain, (list, tuple)) else [chain])
+    pools: Dict[str, BrowserPool] = {}
+    for eng in sorted(engines_needed):
+        bc = replace(config.browser, engine=eng)
+        if eng == "chrome-local" and not bc.cdp_url:
+            bc = replace(bc, cdp_url=config.browser.cdp_url or "http://172.20.0.1:9222")
+        pools[eng] = BrowserPool(bc, user_agent=config.extract.browser_user_agent)
+        logger.info("Browser pool for engine=%s", eng)
+    return pools
+
+
+browser_pools: Dict[str, BrowserPool] = _make_pools()
+
+
+def get_pool_for_search_engine(search_engine: str, browser: Optional[str] = None) -> BrowserPool:
+    """Resolve the browser pool used to render a given search engine SERP
+    (provider=forage). Falls back to the configured default browser engine.
+
+    ``browser`` overrides the chain (used by the fallback logic in serp.py).
+    """
+    wanted = browser or _first_browser_for(search_engine)
+    return browser_pools[wanted]
+
+
+def browser_chain_for(search_engine: str) -> List[str]:
+    """Ordered list of browser engines to try for a search engine (provider=forage).
+
+    ``browser.search_engine_overrides`` may map a search engine to a single
+    engine id or a fallback chain (list). Unlisted search engines use the
+    configured default browser engine.
+    """
+    override = config.browser.search_engine_overrides.get(search_engine)
+    if override:
+        return list(override) if isinstance(override, (list, tuple)) else [override]
+    return [config.browser.engine]
+
+
+def _first_browser_for(search_engine: str) -> str:
+    return browser_chain_for(search_engine)[0]
 
 api_keys = load_api_keys()
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -54,9 +103,11 @@ def require_auth(
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await browser_pool.start()
+    for pool in browser_pools.values():
+        await pool.start()
     yield
-    await browser_pool.stop()
+    for pool in browser_pools.values():
+        await pool.stop()
 
 
 app = FastAPI(
@@ -102,6 +153,7 @@ async def health() -> dict:
         "version": __version__,
         "config_source": config.source_path,
         "browser_engine": config.browser.engine,
+        "search_provider": config.search.provider,
         "cache": {
             "enabled": config.cache.enabled,
             "max_entries": config.cache.max_entries,
@@ -124,7 +176,8 @@ async def search(
     cache_control: Optional[str] = Header(default=None),
     _auth: None = Depends(require_auth),
 ) -> JSONResponse:
-    """Search via SearXNG, normalized to the Hermes web-search envelope."""
+    """Search via the configured provider (SearXNG or Forage's own SERP
+    engines), normalized to the Hermes web-search envelope."""
     bypass = bool(cache_control and "no-cache" in cache_control.lower())
     cache_enabled = config.cache.enabled and config.cache.search.enabled and not bypass
 
@@ -134,13 +187,24 @@ async def search(
         if cached is not None:
             return JSONResponse(content=cached, headers={"X-Forage-Cache": "hit"})
 
-    result = search_searxng(
-        config,
-        query=req.query,
-        limit=req.limit,
-        language=req.language,
-        engines=req.engines,
-    )
+    if config.search.provider == "forage":
+        result = await search_forage(
+            config,
+            get_pool_for_search_engine,
+            browser_chain_for,
+            query=req.query,
+            limit=req.limit,
+            language=req.language,
+            engines=req.engines,
+        )
+    else:
+        result = search_searxng(
+            config,
+            query=req.query,
+            limit=req.limit,
+            language=req.language,
+            engines=req.engines,
+        )
 
     if cache_enabled and result.get("success"):
         search_cache.set(key, result, ttl=config.cache.search.ttl)
@@ -177,7 +241,7 @@ async def extract(
         try:
             return await extract_url(
                 config,
-                browser_pool,
+                browser_pools[config.browser.engine],
                 url,
                 force_render=req.force_render,
                 wait_for=req.wait_for,

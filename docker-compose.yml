@@ -24,3 +24,4 @@ services:
 networks:
   searxng_default:
     external: true
+    enable_ipv6: true

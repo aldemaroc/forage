@@ -101,7 +101,7 @@ class BrowserPool:
 
     def __init__(self, browser_config: Any, user_agent: Optional[str] = None) -> None:
         self.engine = browser_config.engine
-        self.cdp_url = getattr(browser_config, "cdp_url", "")  # engine=obscura
+        self.cdp_url = getattr(browser_config, "cdp_url", "")  # engine=obscura / chrome-local
         self.min_idle = browser_config.min_idle
         self.max_instances = browser_config.max_instances
         self.idle_timeout = browser_config.idle_timeout
@@ -154,13 +154,14 @@ class BrowserPool:
             self._started = True
             logger.info("Scrapling session ready (max_pages=%d)", self.max_instances)
             return
-        if self.engine == "obscura":
-            # External CDP server (Obscura). Connect once; the server owns
-            # the browser processes. Concurrency is capped client-side.
+        if self.engine == "obscura" or self.engine == "chrome-local":
+            # External CDP server (Obscura or the local desktop Chrome for
+            # Hermes on 9222). Connect once; the server owns the browser
+            # processes. Concurrency is capped client-side.
             from playwright.async_api import async_playwright
 
             if not self.cdp_url:
-                raise RuntimeError("browser.cdp_url is required for engine=obscura")
+                raise RuntimeError("browser.cdp_url is required for this engine")
             self._pw = await async_playwright().start()
             self._cdp_browser = await self._pw.chromium.connect_over_cdp(
                 endpoint_url=self.cdp_url,
@@ -168,7 +169,7 @@ class BrowserPool:
             )
             self._semaphore = asyncio.Semaphore(self.max_instances)
             self._started = True
-            logger.info("Obscura CDP connected: %s", self.cdp_url)
+            logger.info("CDP connected: %s (engine=%s)", self.cdp_url, self.engine)
             return
         if self.engine == "patchright":
             from patchright.async_api import async_playwright
@@ -289,7 +290,7 @@ class BrowserPool:
         chal_cap = self.challenge_timeout if challenge_timeout is None else challenge_timeout
         if self.engine == "scrapling":
             return await self._scrapling_render(url, wait_for, timeout, steps, idle_cap, chal_cap, readability)
-        if self.engine == "obscura":
+        if self.engine in ("obscura", "chrome-local"):
             return await self._cdp_render(url, wait_for, timeout, steps, idle_cap, readability)
         browser = await self.acquire()
         page = None
@@ -353,19 +354,40 @@ class BrowserPool:
         page = None
         context = None
         try:
-            context = await self._cdp_browser.new_context(
-                user_agent=self.user_agent,
-                viewport={"width": 1280, "height": 800},
-            )
+            if self.engine == "chrome-local":
+                # The local desktop Chrome is already running with its real
+                # profile (cookies, trust, no incognito). Playwright's
+                # new_context() would create an INCORGNITO context that Google
+                # treats as automation. Use the browser's existing default
+                # context (the real Chrome profile) instead.
+                if not self._cdp_browser.contexts:
+                    raise RuntimeError("chrome-local: no existing browser context found")
+                context = self._cdp_browser.contexts[0]
+            else:
+                context = await self._cdp_browser.new_context(
+                    user_agent=self.user_agent,
+                    viewport={"width": 1280, "height": 800},
+                )
             page = await context.new_page()
-            if self.stealth:
+            # engine=chrome-local: the desktop Chrome is already a real
+            # browser; injecting the stealth init script (navigator.webdriver
+            # override etc.) is exactly the automation fingerprint Google
+            # detects. Only apply stealth to engines that are actually headless.
+            if self.stealth and self.engine != "chrome-local":
                 await page.add_init_script(STEALTH_INIT_SCRIPT)
             await page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=timeout * 1000,
             )
-            if wait_for:
+            if self.engine == "chrome-local":
+                # The Google SERP sometimes resolves its challenge a moment
+                # after domcontentloaded. A fixed 3s settle wait beats
+                # networkidle, which on a challenge page returns instantly
+                # (challenge pages fire no background requests). Validated by
+                # the isolated playwright test: h3=10 with a 3s wait.
+                await page.wait_for_timeout(3000)
+            elif wait_for:
                 await page.wait_for_selector(wait_for, timeout=timeout * 1000)
             else:
                 try:
@@ -389,7 +411,9 @@ class BrowserPool:
                     await page.close()
                 except Exception:  # noqa: BLE001
                     pass
-            if context is not None:
+            # engine=chrome-local: never close the shared real-profile context
+            # (it belongs to the desktop Chrome; only the page is ours).
+            if context is not None and self.engine != "chrome-local":
                 try:
                     await context.close()
                 except Exception:  # noqa: BLE001

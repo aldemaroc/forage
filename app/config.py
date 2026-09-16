@@ -38,6 +38,8 @@ DEFAULTS: Dict[str, Any] = {
         "default_lang": "pt-BR",
         "engines": ["google", "bing", "brave", "startpage"],
         "timeout": 15,
+        "provider": "searxng",           # "searxng" (default) or "forage" (own SERP engines)
+        "serp_timeout": 20,               # provider=forage: seconds per SERP render
     },
     "extract": {
         "timeout": 30,
@@ -68,6 +70,13 @@ DEFAULTS: Dict[str, Any] = {
         "challenge_timeout": 15,
         "solve_cloudflare": False,
         "fallback_solver": True,
+        # Per-search-engine browser overrides (provider=forage only).
+        # Key = search engine id (google/bing/yahoo/duckduckgo), value = browser
+        # engine id OR an ordered LIST of browser engine ids (fallback chain:
+        # if the first one hits a challenge, the next one is tried, e.g.
+        # google: [scrapling, chrome-local]). Engines not listed here use
+        # browser.engine. Empty dict = all use browser.engine.
+        "search_engine_overrides": {},
     },
     "auth": {"enabled": False},
 }
@@ -114,6 +123,8 @@ class SearchConfig:
     default_lang: str = "pt-BR"
     engines: tuple = ("google", "bing", "brave", "startpage")
     timeout: int = 15
+    provider: str = "searxng"  # "searxng" (default) or "forage" (own SERP engines)
+    serp_timeout: int = 20  # provider=forage: seconds per SERP render
 
 
 @dataclass(frozen=True)
@@ -169,6 +180,7 @@ class BrowserConfig:
     challenge_timeout: int = 15  # max seconds to wait for an anti-bot challenge to auto-resolve (scrapling engine)
     solve_cloudflare: bool = False  # scrapling: use its built-in Cloudflare solver (adds ~5s/page) or the page_action poll (default)
     fallback_solver: bool = True  # on anti-bot failure, retry with scrapling + built-in solver as last resort
+    search_engine_overrides: dict = field(default_factory=dict)  # search engine -> browser engine (provider=forage)
 
 
 @dataclass(frozen=True)
@@ -207,6 +219,8 @@ class ForageConfig:
                 default_lang=search.get("default_lang", DEFAULTS["search"]["default_lang"]),
                 engines=tuple(search.get("engines", DEFAULTS["search"]["engines"])),
                 timeout=search.get("timeout", DEFAULTS["search"]["timeout"]),
+                provider=search.get("provider", DEFAULTS["search"]["provider"]),
+                serp_timeout=search.get("serp_timeout", DEFAULTS["search"]["serp_timeout"]),
             ),
             extract=ExtractConfig(
                 **{
@@ -241,16 +255,37 @@ class ForageConfig:
             raise ValueError("browser.challenge_timeout deve ser >= 0")
         if self.browser.solve_cloudflare and self.browser.engine != "scrapling":
             raise ValueError("browser.solve_cloudflare só se aplica ao engine scrapling")
-        if self.browser.engine not in ("playwright", "patchright", "scrapling", "obscura"):
-            raise ValueError(f"browser.engine inválido: {self.browser.engine} (use playwright, patchright, scrapling ou obscura)")
-        if self.browser.engine == "obscura" and not self.browser.cdp_url:
-            raise ValueError("browser.engine=obscura exige browser.cdp_url (ex.: http://127.0.0.1:9223)")
+        if self.browser.engine not in ("playwright", "patchright", "scrapling", "obscura", "chrome-local"):
+            raise ValueError(
+                f"browser.engine inválido: {self.browser.engine} (use playwright, patchright, scrapling, obscura ou chrome-local)"
+            )
+        if self.browser.engine in ("obscura", "chrome-local") and not self.browser.cdp_url:
+            raise ValueError(
+                f"browser.engine={self.browser.engine} exige browser.cdp_url (ex.: http://172.20.0.1:9222)"
+            )
         if self.extract.engine not in ("trafilatura", "readability"):
             raise ValueError(
                 f"extract.engine inválido: {self.extract.engine} (use trafilatura ou readability)"
             )
         if self.browser.min_idle > self.browser.max_instances and self.browser.max_instances > 0:
             raise ValueError("browser.min_idle não pode exceder browser.max_instances")
+        if self.search.provider not in ("searxng", "forage"):
+            raise ValueError(
+                f"search.provider inválido: {self.search.provider} (use searxng ou forage)"
+            )
+        if self.search.serp_timeout < 1 or self.search.serp_timeout > 120:
+            raise ValueError(
+                f"search.serp_timeout deve estar entre 1 e 120s: {self.search.serp_timeout}"
+            )
+        valid_browsers = ("playwright", "patchright", "scrapling", "obscura", "chrome-local")
+        for se, be in self.browser.search_engine_overrides.items():
+            chain = be if isinstance(be, (list, tuple)) else [be]
+            for b in chain:
+                if b not in valid_browsers:
+                    raise ValueError(
+                        f"browser.search_engine_overrides[{se}]: browser engine inválido {b} "
+                        f"(use {', '.join(valid_browsers)})"
+                    )
         for override in self.extract.domain_overrides:
             if not override.pattern:
                 raise ValueError("extract.domain_overrides: padrão de domínio não pode ser vazio")

@@ -2,6 +2,10 @@
 .env
 config.yaml
 
+# Local test artifacts (not part of the repo)
+config.test-*.yaml
+docker-compose.test-*.yml
+
 # Python
 __pycache__/
 *.pyc
