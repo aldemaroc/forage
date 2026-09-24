@@ -71,34 +71,37 @@ The container runs its own Chromium as a subprocess. It never touches any extern
 
 ## Quick start
 
-1. **Pick the image**: pull the published one, or build from source. Both use the same compose file.
+The image ships its own default config, so the first run needs nothing but Docker.
+
+1. **Run the published image** (no clone, no config file):
 
 ```bash
-# Option A: published image (ghcr.io/aldemaroc/forage)
-git clone https://github.com/aldemaroc/forage.git
-cd forage
-docker compose pull          # then: docker compose up -d
-
-# Option B: build from source
-docker compose up -d --build
+docker run --rm -p 127.0.0.1:3672:3672 ghcr.io/aldemaroc/forage:1.0.0
+curl http://localhost:3672/health
+# → {"status":"ok","service":"forage","version":"1.0.0",...}
 ```
 
-2. **Search works out of the box.** With the default `search.provider: forage` the SERPs are rendered in Forage's own browser, in the same container: no SearXNG, no shared network, nothing else to start. Only if you would rather delegate search to SearXNG, set `search.provider: searxng` and follow [docs/SEARXNG.md](docs/SEARXNG.md) (it includes the `docker-compose.override.yml` that joins Forage to the SearXNG network).
-
-3. **Configure**
+2. **For a persistent setup**, clone and configure:
 
 ```bash
+git clone https://github.com/aldemaroc/forage.git
+cd forage
 cp config.example.yaml config.yaml   # behavior: port, cache, search, browser, ...
 cp .env.example .env                 # secrets: FORAGE_API_KEYS, TZ
 ```
 
-4. **Run and check**
+Both files are required before `up`: the compose mounts `config.yaml` (without it Docker creates a directory in its place) and reads `.env`.
+
+3. **Start it with the published image** (nothing to build):
 
 ```bash
+docker compose pull                  # ghcr.io/aldemaroc/forage:1.0.0, also tagged 1.0, 1, latest
 docker compose up -d
-curl http://localhost:3672/health
-# → {"status":"ok","service":"forage","version":"1.0.0",...}
 ```
+
+To build from source instead, run `docker compose up -d --build`: it skips the pull and tags the local build with the published name, so both paths are interchangeable.
+
+4. **Search works out of the box.** With the default `search.provider: forage` the SERPs are rendered in Forage's own browser, in the same container: no SearXNG, no shared network, nothing else to start. Only if you would rather delegate search to SearXNG, set `search.provider: searxng` and follow [docs/SEARXNG.md](docs/SEARXNG.md) (it includes the `docker-compose.override.yml` that joins Forage to the SearXNG network).
 
 5. **Try it**
 
