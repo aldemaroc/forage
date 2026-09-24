@@ -60,6 +60,13 @@ image are now considered stable.
   needs a `docker-compose.override.yml` joining that network, shown in
   [docs/SEARXNG.md](docs/SEARXNG.md).
 
+### Removed
+
+- **The engine benchmark** (`benchmark/` and `docs/BENCHMARK.md`). Comparing
+  browser engines from scratch is no longer part of the project: `scrapling` is
+  the default engine, and the per-domain overrides in `config.example.yaml`
+  keep the note of what each override was tested against.
+
 ### Upgrading from the testing phase
 
 ```bash

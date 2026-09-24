@@ -123,7 +123,7 @@ extract:
       force_render: true
       scroll: true              # comments mount on scroll
       network_idle_timeout: 10  # slow hydration (comments/recommendations)
-      engine: readability       # benchmark 2026-08-08: traf error in browser; readability ok (15.7s)
+      engine: readability       # validated 2026-08-08: trafilatura errored in browser; readability ok (15.7s)
       timeout: 60
     youtu.be:
       force_render: true
@@ -136,7 +136,7 @@ extract:
                                 # (trafilatura drops it) AND returns structured
                                 # markdown (full_text only gave plain text)
       timeout: 60               # 1.5MB+ DOM with the full buybox
-    # ---- readability via benchmark 2026-08-08 (trafilatura failed info/access) ----
+    # ---- readability chosen after testing 2026-08-08 (trafilatura failed info/access) ----
     bestbuy.com:
       engine: readability       # traf: timeout 60s; readability ok (33.4s)
       timeout: 60
@@ -146,7 +146,7 @@ extract:
     marketwatch.com:
       engine: readability       # traf: ok but no price (384c); readability has price (27k)
     yahoo.com:
-      engine: readability       # traf: quote page became an article without quotes; readability returns full quotes (benchmark 09/08)
+      engine: readability       # traf: quote page became an article without quotes; readability returns full quotes (tested 09/08)
     openai.com:
       engine: readability       # traf: /news/ became "category+date" without titles (cards treated as boilerplate); readability keeps the cards (09/08)
     playstation.com:
@@ -173,7 +173,7 @@ extract:
     reddit.com:                 # after rewrite, keep full text (comments)
       full_text: true
     fandom.com:
-      force_render: true        # 3.3MB HTML (16-24s in the benchmark)
+      force_render: true        # 3.3MB HTML (16-24s measured)
       network_idle_timeout: 10
       timeout: 60
     dailymail.co.uk:
@@ -185,7 +185,7 @@ extract:
       challenge_timeout: 30
       timeout: 45
     zoom.us:
-      force_render: true        # pricing page ~15s in the benchmark
+      force_render: true        # pricing page ~15s measured
       timeout: 45
     twitch.tv:
       force_render: true

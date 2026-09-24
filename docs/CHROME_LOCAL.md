@@ -122,7 +122,8 @@ Notes:
 ## Why IPv6 did not fix Google
 
 The Docker daemon and the `searxng_default` compose network were enabled for
-IPv6 (daemon `fixed-cidr-v6`, subnet `fd00:20::/64`); the host has provider
+IPv6 (daemon `fixed-cidr-v6`, subnet `fd00:20::/64`; Forage's compose no longer
+joins that network, it was where the test containers ran); the host has provider
 IPv6 and containers now egress with a real public IPv6 (`curl -6 ident.me`
 inside the container returns the host's IPv6). The Google challenge persisted
 on every headless engine over both stacks - proving the block is

@@ -62,13 +62,15 @@ API: `GET /health`, `POST /search`, `POST /extract`,
   headings, bold, lists, code blocks. Tested against html2text/markdownify/
   readability-lxml: trafilatura markdown is the best cost/benefit.
 - **Extract engine is pluggable via config** (`extract.engine`, default
-  `trafilatura`; per-domain via the `engine` override key; request-level
+  `readability`; per-domain via the `engine` override key; request-level
   `engine` param is absolute). The `readability` engine runs Mozilla
   Readability.js inside the page (`page.evaluate`, no Node runtime) and
   converts the article with markdownify. It exists because trafilatura's
   main-content heuristic drops non-article blocks (Amazon buybox), and
   `full_text` only recovers them as plain text. `.amazon.*` uses it by
-  default.
+  default. `trafilatura` is the lighter option and is always what the static
+  path uses: the engine only picks the converter for pages that already need
+  a browser render, it never forces one.
 - **Stealth built in, no extra dependency**: `browser.stealth: true` (default)
   sets `--disable-blink-features=AutomationControlled` + an init script that
   masks `navigator.webdriver`/`chrome`/`languages`/`plugins`, plus a real
@@ -79,9 +81,10 @@ API: `GET /health`, `POST /search`, `POST /extract`,
   impersonation + Cloudflare Turnstile bypass), `playwright` (vanilla),
   `patchright` (anti-detection fork), `obscura` (experimental Rust/V8 browser
   via CDP).
-- **Cache in memory, per operation**: search ON (TTL 300s, protects SearXNG
-  engines from bot detection), extract OFF by default (always fresh; TTL 120s
-  on the instance). Master switch `cache.enabled` + per-section toggles.
+- **Cache in memory, per operation**: search ON (TTL 300s, protects the search
+  engines from bot detection, whether they are Forage's own SERP renders or
+  SearXNG), extract OFF by default (always fresh; TTL 120s on the instance).
+  Master switch `cache.enabled` + per-section toggles.
 - **Config reload = container restart only.** The config decides whether
   browser processes start; hot reload would be fragile. 1-2s downtime is fine.
 - **`raw_content_markdown: true` (default)**: `raw_content` mirrors the clean
@@ -182,8 +185,11 @@ override.
 - **`disable_resources=True` (Scrapling) must NOT be used**: it blocks
   stylesheets/fonts and breaks pages (fandom returned 1KB, x.com incomplete).
 - **Scrapling's `start()`/`close()` are coroutines**: always `await` them.
-- **`host.docker.internal` does not resolve in a custom compose network**: use
-  a shared docker network and the service name (`searxng:8080`).
+- **`host.docker.internal` does not resolve in a custom compose network**:
+  when searching through SearXNG, put both containers on a shared docker
+  network and reach it by service name (`searxng:8080`). This only applies to
+  the SearXNG setup: with the default `search.provider: forage` nothing
+  external is called.
 - **File bind mounts do not follow renames**: editing `config.yaml` in place
   swaps the inode, and a file bind mount keeps pointing at the old inode. After
   editing the config, recreate the container (`docker compose up -d --build`).
@@ -191,7 +197,7 @@ override.
   (IntersectionObserver): `scrollBy`/viewport jumps do not fire it. Use
   `browser.scroll_steps` or the `scroll` override.
 - **Sites vary between runs**: anti-bot is intermittent (stackoverflow, tiktok,
-  ebay). A failure in one benchmark round is not a regression; re-test isolated
+  ebay). A failure in a single run is not a regression; re-test isolated
   before concluding.
 - **Headless Chromium is flagged by Google on the first request**: playwright,
   patchright and scrapling headless all land on `/sorry/` immediately, while
@@ -237,9 +243,6 @@ curl -s -X POST http://localhost:3672/v1/scrape -H 'Content-Type: application/js
 
 Reference validation set (regression baseline): Wikipedia/GitHub/docs = static;
 x.com = browser; a Cloudflare-protected page = browser + challenge handling.
-A benchmark script lives in `benchmark/` (three containers with configs that
-differ only in `browser.engine`, same URL list, same criteria; ✅ = no error,
-content >= 100 chars, non-empty title).
 
 ## Conventions
 
@@ -261,13 +264,12 @@ content >= 100 chars, non-empty title).
 
 ## Docs map
 
-- `README.md` — what it is, quickstart, API reference
-- `CHANGELOG.md` — notable changes per release (Keep a Changelog)
-- `docs/CONFIG.md` — every config key
-- `docs/FIRECRAWL.md` — Firecrawl compatibility: mappings, error codes, non-goals
-- `docs/CHROME_LOCAL.md` — host desktop Chrome engine (chrome-local) setup and pitfalls
-- `docs/SEARXNG.md` — SearXNG install + docker network pitfalls
-- `docs/HERMES.md` — integration with the Hermes agent
-- `docs/BENCHMARK.md` — engine comparison tables
-- `config.example.yaml` — default configuration (keep in sync with CONFIG.md)
-- `.github/workflows/release.yml` — tag -> GHCR image + GitHub Release
+- `README.md` - what it is, quickstart, API reference
+- `CHANGELOG.md` - notable changes per release (Keep a Changelog)
+- `docs/CONFIG.md` - every config key
+- `docs/FIRECRAWL.md` - Firecrawl compatibility: mappings, error codes, non-goals
+- `docs/CHROME_LOCAL.md` - host desktop Chrome engine (chrome-local) setup and pitfalls
+- `docs/SEARXNG.md` - optional SearXNG setup and how to join its docker network
+- `docs/HERMES.md` - integration with the Hermes agent
+- `config.example.yaml` - default configuration (keep in sync with CONFIG.md)
+- `.github/workflows/release.yml` - tag -> GHCR image + GitHub Release

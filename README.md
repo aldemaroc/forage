@@ -19,7 +19,7 @@ Built specifically for [Hermes Agent](https://hermes-agent.nousresearch.com), bu
 
 Self-hosted Firecrawl works, but it is a heavy stack: the community edition spins up **six containers** (API, Playwright service, Redis, RabbitMQ, Postgres…). Forage replaces it with a **single container** that does both jobs:
 
-- **`web_search`**: via [SearXNG](https://github.com/searxng/searxng) (a separate lightweight container) **or** Forage's own SERP engines (browser render + per-engine DOM parse of Google/Bing/Yahoo/DuckDuckGo, no SearXNG needed, see `search.provider`)
+- **`web_search`**: via Forage's own SERP engines (browser render + per-engine DOM parse of Google/Bing/Yahoo/DuckDuckGo, `search.provider: forage`, the default, no SearXNG needed) **or** via [SearXNG](https://github.com/searxng/searxng) (a separate lightweight container, opt-in)
 - **`web_extract`**: hybrid static + browser extraction with three switchable browser engines, two switchable extract engines and anti-bot coverage
 
 It was developed as the extract/search backend for Hermes Agent and ships with a ready-made Hermes plugin (`WebSearchProvider`), but the REST API is generic: any application that can speak HTTP can use it. For Firecrawl clients there is a compatibility layer: `POST /v1/scrape` answers in Firecrawl's envelope, so switching is a base-URL change (see [docs/FIRECRAWL.md](docs/FIRECRAWL.md)).
@@ -293,23 +293,6 @@ report an error rather than junk content. When a challenge is detected and
 the Scrapling built-in solver as a last resort; the final `method` is
 `browser+solver` when that retry succeeds.
 
-## Benchmark
-
-50 real sites (top-30 web + 20 agent-relevant: docs, tools, reference) tested
-against all three engines on the same machine, same criteria. See
-[docs/BENCHMARK.md](docs/BENCHMARK.md) for the full table.
-
-| Engine | Accessible Websites | Inaccessible | Mean scrape time |
-|---|---|---|---|
-| playwright | 48 | 2 | 3.3s |
-| patchright | 47 | 3 | 3.2s |
-| scrapling | **48** | **2** | 3.6s |
-
-scrapling is the only engine that passes every Cloudflare-protected site it
-encounters (dailymail). Sites behind intermittent anti-bot (stackoverflow,
-tiktok) vary between runs on every engine. Mean time includes only successful
-scrapes.
-
 ## Releases
 
 Container images are published to GitHub Container Registry and every tag has
@@ -353,7 +336,7 @@ the workflow.
 curl -s -X POST http://localhost:3672/search -H 'Content-Type: application/json' -d '{"query":"test","limit":3}'
 ```
 
-The app lives in `app/` (FastAPI). Configuration loading, caching, the SearXNG client, the hybrid extractor, the browser pool and auth are each in their own module.
+The app lives in `app/` (FastAPI): config loading, caching, the SearXNG client, the own-SERP engine (`serp.py`), the virtual display, the hybrid extractor, the browser pool, the Firecrawl-compatible router and auth are each in their own module.
 
 ## License
 

@@ -3,8 +3,10 @@
 Forage ships with a ready-made plugin for [Hermes Agent](https://hermes-agent.nousresearch.com). It implements the `WebSearchProvider` interface, so Hermes uses Forage for both `web_search` and `web_extract`, with no code changes to Hermes itself.
 
 ```
-Hermes → plugin web/forage (WebSearchProvider) → local HTTP → Forage → SearXNG / pages
+Hermes → plugin web/forage (WebSearchProvider) → local HTTP → Forage → SERPs / pages
 ```
+
+Forage searches on its own by default (its own SERP engines); SearXNG, if you use it, sits behind Forage in the same place.
 
 ## 1. Install the plugin
 
@@ -67,7 +69,7 @@ export SEARXNG_URL=http://localhost:8080   # Hermes .env
 
 Trade-off: search skips Forage (one less hop, no Forage search cache), while extraction still gets Forage's hybrid static/browser pipeline.
 
-## 3.1 Full-page extraction tool (`forage_full_extract`)
+## 4. Full-page extraction tool (`forage_full_extract`)
 
 The plugin also registers a custom Hermes **agent tool** that runs extraction
 with `only_main_content: false` at runtime to grab forum comments, thread
@@ -89,7 +91,7 @@ default for new plugins. If it does not appear after a gateway restart, run
 platform. The underlying service config (`domain_overrides` rewrites,
 `full_text`, stealth, etc.) still applies.
 
-## 4. Enabling auth
+## 5. Enabling auth
 
 1. Forage side: `auth.enabled: true` in Forage's `config.yaml` + `FORAGE_API_KEYS=key1,key2` in Forage's `.env` → `docker compose restart`
 2. Hermes side: `FORAGE_API_KEY=<one of the keys>` in Hermes' `.env` → restart the gateway
