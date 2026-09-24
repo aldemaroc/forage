@@ -29,9 +29,9 @@ It was developed as the extract/search backend for Hermes Agent and ships with a
 - **Firecrawl-compatible API**: `POST /v1/scrape` (Firecrawl request fields, Firecrawl response envelope and error codes) and `POST /v1/search` (v1 shape), served from the same container and port as the native API. Formats `markdown`/`html`/`rawHtml`; unsupported Firecrawl options are ignored and reported instead of failing the request
 - **Single Docker container**: FastAPI + Chromium (via Playwright, Patchright or Scrapling) + httpx/trafilatura
 - **Hybrid extraction**: static HTTP first (fast, cheap), automatic browser fallback when the page needs JS or is anti-bot protected
-- **Four browser engines** (`browser.engine`): `playwright` (default), `patchright` (anti-detection fork), `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass) and `chrome-local` (the host's real desktop Chrome over CDP, for anti-bot that blocks every headless browser - see [docs/CHROME_LOCAL.md](docs/CHROME_LOCAL.md))
+- **Four browser engines** (`browser.engine`): `scrapling` (default, fingerprint impersonation + Cloudflare Turnstile bypass), `playwright` (vanilla), `patchright` (anti-detection fork) and `chrome-local` (the host's real desktop Chrome over CDP, for anti-bot that blocks every headless browser - see [docs/CHROME_LOCAL.md](docs/CHROME_LOCAL.md))
 - **Own SERP search backend** (`search.provider: forage`): renders the search engine pages through the browser pool and parses each engine's DOM (BeautifulSoup), with ordered engines, automatic fallback on failure (never mistake a CAPTCHA for an empty answer), and parallel fan-out when more results than one engine offers are needed. Search engines can map to per-engine browser chains, e.g. `google: [scrapling, chrome-local]`
-- **Two extract engines** (`extract.engine`, per-domain or per request): `trafilatura` (default, main-content markdown) and `readability` (Mozilla Readability.js in the browser + markdownify, keeps buyboxes/comments that trafilatura drops as non-main). Amazon product pages use `readability` by default
+- **Two extract engines** (`extract.engine`, per-domain or per request): `readability` (default, Mozilla Readability.js in the browser + markdownify, keeps buyboxes/comments that trafilatura drops as non-main) and `trafilatura` (lighter plain-HTTP main content). Neither forces a render: the engine only matters once a page already needs the browser. Amazon product pages use `readability` by default
 - **Anti-bot fallback** (`browser.fallback_solver`): if any engine hits a challenge, Forage retries the page with the Scrapling built-in solver as a last resort
 - **Structured markdown output**: extraction is returned as real markdown (headings, bold, lists, code blocks) via trafilatura's markdown format or the Readability.js + markdownify engine
 - **Basic stealth**: hides automation signals from Cloudflare-class protections (configurable, on by default)
@@ -58,7 +58,7 @@ FORAGE (single container, :3672)
    ├── Chromium             → JS rendering via playwright | patchright | scrapling
    │                          (in-process pool, stealth, anti-bot solver fallback,
    │                           in-browser Readability.js for the "readability" engine)
-   └── search               → SearXNG (shared docker network) or own SERP engines
+   └── search               → own SERP engines (Google/Bing/Yahoo/DuckDuckGo) or SearXNG
 ```
 
 The container runs its own Chromium as a subprocess. It never touches any external browser or CDP endpoint, unless a CDP endpoint is configured on purpose (`browser.cdp_url` / `browser.search.cdp_url`).
@@ -66,7 +66,7 @@ The container runs its own Chromium as a subprocess. It never touches any extern
 ## Requirements
 
 - Docker Engine 24+ with Docker Compose v2
-- A SearXNG instance on a shared Docker network (see [docs/SEARXNG.md](docs/SEARXNG.md)), **unless** you use Forage's own SERP engines (`search.provider: forage`)
+- Nothing extra for search: the default `search.provider: forage` renders the SERPs inside Forage's own container, so the stack runs alone. SearXNG is only needed if you opt into it (see [docs/SEARXNG.md](docs/SEARXNG.md))
 - ~3 GB free disk for the image (Chromium included)
 
 ## Quick start
@@ -83,7 +83,7 @@ docker compose pull          # then: docker compose up -d
 docker compose up -d --build
 ```
 
-2. **Set up SearXNG** if you want `search.provider: searxng`: follow [docs/SEARXNG.md](docs/SEARXNG.md). You need a SearXNG instance running on a shared Docker network named `searxng_default` (the default network name from the SearXNG compose). **Start SearXNG before Forage**: Forage's compose joins that network as external and will not start without it. With the default `search.provider: forage` no SearXNG is needed for search (the compose file still expects the shared network to exist).
+2. **Search works out of the box.** With the default `search.provider: forage` the SERPs are rendered in Forage's own browser, in the same container: no SearXNG, no shared network, nothing else to start. Only if you would rather delegate search to SearXNG, set `search.provider: searxng` and follow [docs/SEARXNG.md](docs/SEARXNG.md) (it includes the `docker-compose.override.yml` that joins Forage to the SearXNG network).
 
 3. **Configure**
 

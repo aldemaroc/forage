@@ -1,6 +1,16 @@
-# Setting up SearXNG for Forage
+# Setting up SearXNG for Forage (optional)
 
-Forage delegates all search to [SearXNG](https://github.com/searxng/searxng), a privacy-respecting metasearch engine that aggregates Google, Bing, Brave, etc. without API keys.
+Forage can delegate search to [SearXNG](https://github.com/searxng/searxng), a privacy-respecting metasearch engine that aggregates Google, Bing, Brave, etc. without API keys.
+
+> **SearXNG is optional.** Since 1.0.0 the default is `search.provider: forage`: Forage renders the SERPs itself, in its own browser, in the same container, and the stack in `docker-compose.yml` runs alone with no extra network. Use this guide only if you would rather keep a SearXNG instance in front of the engines.
+
+To switch, set both keys in `config.yaml`:
+
+```yaml
+search:
+  provider: searxng
+  searxng_url: http://searxng:8080
+```
 
 > **Why SearXNG?** It is a single lightweight container, self-hosted, and it does the hard part of talking to multiple search engines (including dealing with their anti-bot quirks). Forage caches results for 5 minutes by default, which further protects the engines.
 
@@ -70,15 +80,24 @@ engines:
 
 Forage and SearXNG must be on the **same Docker network** so Forage can call SearXNG by service name (`http://searxng:8080`).
 
-The SearXNG compose above creates a network named `searxng_default`. Forage's compose joins it as an external network:
+Forage's `docker-compose.yml` does **not** join any external network by default. Create a `docker-compose.override.yml` next to it (Compose merges it automatically) to attach Forage to the SearXNG network:
 
 ```yaml
+# docker-compose.override.yml - only needed with search.provider: searxng
+services:
+  forage:
+    networks:
+      - default
+      - searxng_default
+
 networks:
   searxng_default:
     external: true
 ```
 
-If your SearXNG compose uses a different project name, the network will be `<project>_default`. Adjust Forage's `networks:` section and `search.searxng_url` accordingly (e.g. `http://searxng:8080`).
+Then `docker compose up -d` recreates Forage joined to both networks. Keep `search.searxng_url: http://searxng:8080` in `config.yaml`.
+
+The SearXNG compose above creates a network named `searxng_default`. If your SearXNG compose uses a different project name, the network will be `<project>_default`: adjust the `networks:` block above (and `search.searxng_url` if you renamed the service).
 
 > **Why not `host.docker.internal`?** In a custom Compose network, `host.docker.internal` is **not** automatically resolved. Using the shared docker network + service name is the reliable pattern.
 

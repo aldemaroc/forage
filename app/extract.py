@@ -503,7 +503,7 @@ async def extract_url(
     effective_main = only_main_content and not bool(override and override.full_text)
     effective_scroll = bool(override and override.scroll)
     # Extract engine: request-level is absolute; then the domain override;
-    # then the global default ("trafilatura").
+    # then the global default (config.extract.engine, "readability").
     effective_engine = (
         engine
         or (override.engine if override is not None else None)

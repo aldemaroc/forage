@@ -13,8 +13,6 @@ services:
     volumes:
       - ./config.yaml:/etc/forage/config.yaml:ro   # bind mount, read-only
     env_file: .env
-    networks:
-      - searxng_default          # talk to SearXNG by service name (searxng:8080)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3672/health', timeout=3).status==200 else 1)"]
       interval: 30s
@@ -22,10 +20,10 @@ services:
       retries: 3
       start_period: 10s
 
-# SearXNG must run on this shared network so Forage can call it as searxng:8080.
-# See docs/SEARXNG.md. If your SearXNG compose uses another project name,
-# adjust the network name (and search.searxng_url in config.yaml) accordingly.
-networks:
-  searxng_default:
-    external: true
-    enable_ipv6: true
+# No extra network here on purpose. The default `search.provider` is `forage`,
+# which renders the SERPs in the container's own browser, so this stack runs
+# alone on its own compose network and needs nothing else.
+#
+# SearXNG is opt-in (`search.provider: searxng`). Forage then has to reach that
+# container, which means joining the SearXNG network: see "Using SearXNG" in
+# docs/SEARXNG.md for the two-line docker-compose.override.yml that does it.

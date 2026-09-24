@@ -45,7 +45,7 @@ DEFAULTS: Dict[str, Any] = {
         "timeout": 30,
         "max_content_chars": 100000,
         "only_main_content": True,
-        "engine": "trafilatura",   # "trafilatura" (default) or "readability" (Readability.js + markdownify)
+        "engine": "readability",   # "readability" (default; Readability.js + markdownify) or "trafilatura"
         "user_agent": "ForageBot/0.1 (+https://github.com/aldemaroc/forage)",
         "browser_user_agent": None,
         "respect_robots": False,
@@ -57,7 +57,7 @@ DEFAULTS: Dict[str, Any] = {
         "domain_overrides": {},
     },
     "browser": {
-        "engine": "playwright",
+        "engine": "scrapling",   # "scrapling" (default; StealthyFetcher, strongest anti-bot), "playwright", "patchright", "chrome-local"
         "cdp_url": "",       # engine=obscura: CDP endpoint of the Obscura server (http://host:port or ws://host:port)
         "min_idle": 1,
         "max_instances": 5,

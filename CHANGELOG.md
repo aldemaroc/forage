@@ -47,9 +47,18 @@ image are now considered stable.
   its own and `obscura`/`chrome-local` are CDP endpoints: point
   `browser.search.cdp_url` at those instead. Unusable entries are dropped with
   a warning instead of failing.
+- **Defaults aligned with the shipped example**: `extract.engine` is now
+  `readability` (Readability.js + markdownify) and `browser.engine` is now
+  `scrapling` (strongest anti-bot). A config that sets neither key behaves like
+  `config.example.yaml`. The extract engine only applies to pages that already
+  need a render, so nothing gets slower by default.
 - **`docker-compose.yml` now references the published image**
   (`ghcr.io/aldemaroc/forage:1.0.0`). `build: .` still builds locally and
   compose tags that build with the same name.
+- **No external network by default**: the compose no longer joins
+  `searxng_default`, so the stack runs on its own. SearXNG is opt-in and now
+  needs a `docker-compose.override.yml` joining that network, shown in
+  [docs/SEARXNG.md](docs/SEARXNG.md).
 
 ### Upgrading from the testing phase
 
@@ -62,7 +71,13 @@ docker compose up -d --build
 curl http://localhost:3672/health     # → "version":"1.0.0"
 ```
 
-Nothing in `config.yaml` changes: `browser.search` has defaults, so an existing
-config keeps working. `browser.search.headless` defaults to `false` (headful),
-which is what makes the own-SERP engines usable against Google; the Xvfb
-display is started by the app, no Docker flags needed.
+An existing `config.yaml` keeps working: every key it sets wins over the
+defaults. If it does not set `extract.engine`/`browser.engine`, extraction now
+runs `readability` + `scrapling`, the same pair `config.example.yaml` ships.
+
+If you search through SearXNG (`search.provider: searxng`), add the override
+file from [docs/SEARXNG.md](docs/SEARXNG.md) **before** recreating the
+container: the compose no longer joins the SearXNG network on its own.
+`browser.search.headless` defaults to `false` (headful), which is what makes
+the own-SERP engines usable against Google; the Xvfb display is started by the
+app, no Docker flags needed.

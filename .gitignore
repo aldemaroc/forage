@@ -1,6 +1,12 @@
-# Secrets & local instance config
-.env
-config.yaml
+# Secrets and local instance state: never commit.
+# `.env*` catches every variant (.env, .env.local, .env.bak); `config.yaml*`
+# catches the instance config plus any backup/rename of it
+# (config.yaml.backup-20260924, config.yaml.bak); `.config.yaml*` catches the
+# hidden form. The shipped examples stay tracked on purpose.
+.env*
+!.env.example
+config.yaml*
+.config.yaml*
 
 # Local test artifacts (not part of the repo)
 config.test-*.yaml
