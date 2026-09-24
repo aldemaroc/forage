@@ -1,7 +1,11 @@
 services:
   forage:
     build: .
-    image: forage:0.9.0
+    # Published image: docker pull ghcr.io/aldemaroc/forage:1.0.0
+    # `build: .` above keeps local builds working; compose tags the local build
+    # with this name. To run the published image without building, comment out
+    # the build line and use `docker compose pull && docker compose up -d`.
+    image: ghcr.io/aldemaroc/forage:1.0.0
     container_name: forage
     restart: always
     ports:

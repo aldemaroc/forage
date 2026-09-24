@@ -2,12 +2,13 @@
 
 # 🐔 Forage
 
-**Self-hosted web search & extract service: a lightweight, drop-in replacement for self-hosted Firecrawl.**
+**Self-hosted web search & extract service: one container that does what self-hosted Firecrawl does, speaking both the Hermes API and a Firecrawl-compatible `/v1/scrape`.**
 
-Built specifically for [Hermes Agent](https://hermes-agent.nousresearch.com), but fully usable standalone via its REST API.
+Built specifically for [Hermes Agent](https://hermes-agent.nousresearch.com), but fully usable standalone via its REST API, and usable as a drop-in for a Firecrawl client that only needs `POST /v1/scrape`.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)](#quick-start)
+[![ghcr.io](https://img.shields.io/badge/ghcr.io-aldemaroc%2Fforage-2496ED.svg)](#releases)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg)](app/)
 
 </div>
@@ -21,10 +22,11 @@ Self-hosted Firecrawl works, but it is a heavy stack: the community edition spin
 - **`web_search`**: via [SearXNG](https://github.com/searxng/searxng) (a separate lightweight container) **or** Forage's own SERP engines (browser render + per-engine DOM parse of Google/Bing/Yahoo/DuckDuckGo, no SearXNG needed, see `search.provider`)
 - **`web_extract`**: hybrid static + browser extraction with three switchable browser engines, two switchable extract engines and anti-bot coverage
 
-It was developed as the extract/search backend for Hermes Agent and ships with a ready-made Hermes plugin (`WebSearchProvider`), but the REST API is generic: any application that can speak HTTP can use it.
+It was developed as the extract/search backend for Hermes Agent and ships with a ready-made Hermes plugin (`WebSearchProvider`), but the REST API is generic: any application that can speak HTTP can use it. For Firecrawl clients there is a compatibility layer: `POST /v1/scrape` answers in Firecrawl's envelope, so switching is a base-URL change (see [docs/FIRECRAWL.md](docs/FIRECRAWL.md)).
 
 ## Features
 
+- **Firecrawl-compatible API**: `POST /v1/scrape` (Firecrawl request fields, Firecrawl response envelope and error codes) and `POST /v1/search` (v1 shape), served from the same container and port as the native API. Formats `markdown`/`html`/`rawHtml`; unsupported Firecrawl options are ignored and reported instead of failing the request
 - **Single Docker container**: FastAPI + Chromium (via Playwright, Patchright or Scrapling) + httpx/trafilatura
 - **Hybrid extraction**: static HTTP first (fast, cheap), automatic browser fallback when the page needs JS or is anti-bot protected
 - **Four browser engines** (`browser.engine`): `playwright` (default), `patchright` (anti-detection fork), `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass) and `chrome-local` (the host's real desktop Chrome over CDP, for anti-bot that blocks every headless browser - see [docs/CHROME_LOCAL.md](docs/CHROME_LOCAL.md))
@@ -42,51 +44,63 @@ It was developed as the extract/search backend for Hermes Agent and ships with a
 ## Architecture
 
 ```
-Hermes Agent (web_search / web_extract)
-   │  local HTTP
-   ▼
-Forage plugin (WebSearchProvider)        plugins/web/forage/
-   │  POST /search, POST /extract
-   ▼
+Hermes Agent (web_search / web_extract)     Firecrawl client (base URL swap)
+   │  local HTTP                                   │  POST /v1/scrape
+   ▼                                               │
+Forage plugin (WebSearchProvider)                  │
+   │  POST /search, POST /extract                  │
+   ▼                                               ▼
 FORAGE (single container, :3672)
    ├── FastAPI
+   │     ├── native API        POST /search, POST /extract
+   │     └── Firecrawl compat  POST /v1/scrape, POST /v1/search
    ├── httpx + trafilatura  → static extraction (markdown output)
    ├── Chromium             → JS rendering via playwright | patchright | scrapling
    │                          (in-process pool, stealth, anti-bot solver fallback,
    │                           in-browser Readability.js for the "readability" engine)
-   └── search               → SearXNG (shared docker network)
+   └── search               → SearXNG (shared docker network) or own SERP engines
 ```
 
-The container runs its own Chromium as a subprocess. It never touches any external browser or CDP endpoint.
+The container runs its own Chromium as a subprocess. It never touches any external browser or CDP endpoint, unless a CDP endpoint is configured on purpose (`browser.cdp_url` / `browser.search.cdp_url`).
 
 ## Requirements
 
 - Docker Engine 24+ with Docker Compose v2
-- A SearXNG instance (see [docs/SEARXNG.md](docs/SEARXNG.md))
-- ~1 GB free disk for the image (Chromium included)
+- A SearXNG instance on a shared Docker network (see [docs/SEARXNG.md](docs/SEARXNG.md)), **unless** you use Forage's own SERP engines (`search.provider: forage`)
+- ~3 GB free disk for the image (Chromium included)
 
 ## Quick start
 
-1. **Set up SearXNG first**: follow [docs/SEARXNG.md](docs/SEARXNG.md). You need a SearXNG instance running on a shared Docker network named `searxng_default` (the default network name from the SearXNG compose). **Start SearXNG before Forage**: Forage's compose joins that network as external and will not start without it.
-
-2. **Clone and configure**
+1. **Pick the image**: pull the published one, or build from source. Both use the same compose file.
 
 ```bash
+# Option A: published image (ghcr.io/aldemaroc/forage)
 git clone https://github.com/aldemaroc/forage.git
 cd forage
-cp .env.example .env         # secrets: FORAGE_API_KEYS, TZ
-cp config.example.yaml config.yaml   # behavior: port, cache, browser, ...
+docker compose pull          # then: docker compose up -d
+
+# Option B: build from source
+docker compose up -d --build
 ```
 
-3. **Build and run**
+2. **Set up SearXNG** if you want `search.provider: searxng`: follow [docs/SEARXNG.md](docs/SEARXNG.md). You need a SearXNG instance running on a shared Docker network named `searxng_default` (the default network name from the SearXNG compose). **Start SearXNG before Forage**: Forage's compose joins that network as external and will not start without it. With the default `search.provider: forage` no SearXNG is needed for search (the compose file still expects the shared network to exist).
+
+3. **Configure**
 
 ```bash
-docker compose up -d --build
-curl http://localhost:3672/health
-# → {"status":"ok","service":"forage","version":"0.8.1",...}
+cp config.example.yaml config.yaml   # behavior: port, cache, search, browser, ...
+cp .env.example .env                 # secrets: FORAGE_API_KEYS, TZ
 ```
 
-4. **Try it**
+4. **Run and check**
+
+```bash
+docker compose up -d
+curl http://localhost:3672/health
+# → {"status":"ok","service":"forage","version":"1.0.0",...}
+```
+
+5. **Try it**
 
 ```bash
 # Search
@@ -104,6 +118,10 @@ curl -s -X POST http://localhost:3672/extract -H 'Content-Type: application/json
 # Extract a PDF / office document (detected by extension or Content-Type)
 curl -s -X POST http://localhost:3672/extract -H 'Content-Type: application/json' \
   -d '{"urls":["https://example.com/paper.pdf"],"formats":["markdown"]}'
+
+# Firecrawl-compatible (same port, Firecrawl's contract)
+curl -s -X POST http://localhost:3672/v1/scrape -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com","formats":["markdown"]}'
 ```
 
 ## Integrating with Hermes Agent
@@ -187,6 +205,41 @@ If a page is behind an anti-bot challenge (Cloudflare etc.), Forage returns a cl
 
 Clears the in-memory caches (auth-gated). Returns `{ "cleared": N }`.
 
+### Firecrawl compatibility: `POST /v1/scrape`, `POST /v1/search`
+
+The same port also speaks Firecrawl's contract, so a client written against
+Firecrawl works by changing its base URL:
+
+```bash
+curl -s -X POST http://localhost:3672/v1/scrape -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com","formats":["markdown"],"onlyMainContent":true}'
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "markdown": "# Example Domain\n...",
+    "metadata": {
+      "title": "Example Domain",
+      "sourceURL": "https://example.com",
+      "url": "https://example.com",
+      "statusCode": 200,
+      "cacheState": "miss"
+    }
+  }
+}
+```
+
+Errors use Firecrawl's shape and codes (`{"success": false, "code":
+"SCRAPE_ALL_ENGINES_FAILED", "error": "..."}`), including HTTP 500 +
+`SCRAPE_ALL_ENGINES_FAILED` for a page no engine could extract, which is what
+Firecrawl reports and what clients key on to fall back to their own renderer.
+Formats served: `markdown`, `html`, `rawHtml`; every other Firecrawl option is
+accepted, ignored and listed in `data.warning` rather than rejected.
+`POST /v1/search` speaks the v1 shape (`data` as an array). Full matrix,
+mappings and non-goals: **[docs/FIRECRAWL.md](docs/FIRECRAWL.md)**.
+
 ## Configuration
 
 All behavior is driven by `config.yaml` (bind-mounted read-only into the container) and env vars for secrets. Every option is documented in **[docs/CONFIG.md](docs/CONFIG.md)**. Here is the shape:
@@ -194,15 +247,25 @@ All behavior is driven by `config.yaml` (bind-mounted read-only into the contain
 ```yaml
 server:   { host, port, workers, log_level }
 cache:    { enabled, max_entries, search: {enabled, ttl}, extract: {enabled, ttl} }
-search:   { searxng_url, default_lang, engines, timeout }
-extract:  { timeout, max_content_chars, only_main_content, user_agent,
+search:   { provider (searxng|forage), searxng_url, default_lang, engines, timeout,
+            serp_timeout }
+extract:  { timeout, max_content_chars, only_main_content, engine, user_agent,
             browser_user_agent, respect_robots, force_render, wait_for,
-            min_content_chars, raw_content_markdown, domain_overrides }
-browser:  { engine, min_idle, max_instances, idle_timeout, headless, launch_timeout,
-            stealth, network_idle_timeout, scroll_steps, challenge_timeout,
-            solve_cloudflare, fallback_solver }
+            min_content_chars, raw_content_markdown, prefer_markdown,
+            domain_overrides }
+browser:  { engine, cdp_url, min_idle, max_instances, idle_timeout, headless,
+            launch_timeout, stealth, network_idle_timeout, scroll_steps,
+            challenge_timeout, solve_cloudflare, fallback_solver,
+            search_engine_overrides,
+            search: { headless, local, cdp_url, engine, humanize, min_interval,
+                      retries, retry_backoff, settle_ms, user_agent } }
 auth:     { enabled }
 ```
+
+`browser.search.*` configures the browser that renders the SERP pages when
+`search.provider: forage`, independently from the extract browser: headful by
+default (the app starts its own Xvfb display), CDP endpoint or the container
+browser, humanization, process-wide pacing and in-place retries.
 
 | Environment variable | Where | Purpose |
 |---|---|---|
@@ -246,6 +309,42 @@ scrapling is the only engine that passes every Cloudflare-protected site it
 encounters (dailymail). Sites behind intermittent anti-bot (stackoverflow,
 tiktok) vary between runs on every engine. Mean time includes only successful
 scrapes.
+
+## Releases
+
+Container images are published to GitHub Container Registry and every tag has
+a GitHub Release. Available tags: the exact version (`1.0.0`), `1.0`, `1`, and
+`latest` (the latter not for pre-releases).
+
+```bash
+docker pull ghcr.io/aldemaroc/forage:1.0.0
+docker run --rm -p 127.0.0.1:3672:3672 ghcr.io/aldemaroc/forage:1.0.0
+curl http://localhost:3672/health
+```
+
+Building from source (`docker compose up -d --build`) stays supported and
+produces an identical image.
+
+### Cutting a release (maintainers)
+
+`.github/workflows/release.yml` does the work on a tag push. The tag is the
+single source of truth, and the workflow refuses to run when it does not match
+`app/__init__.py`:
+
+```bash
+# 1. bump app/__init__.py and add the CHANGELOG entry, then commit
+# 2. tag and push
+git tag -a v1.0.1 -m "Forage 1.0.1"
+git push origin v1.0.1
+```
+
+The workflow then builds the image, pushes it to `ghcr.io/<owner>/forage` and
+opens the GitHub Release with generated notes. To publish a multi-arch
+manifest (Apple/ARM servers, Raspberry Pi), add `linux/arm64` to `PLATFORMS` in
+the workflow.
+
+> First release only: GHCR creates the package private. Set it to public in the
+> repository's *Packages* settings so anonymous `docker pull` works.
 
 ## Development
 

@@ -30,21 +30,22 @@ cache:
 # --- Search (SearXNG) ----------------------------------------
 # Point this at your SearXNG instance. See docs/SEARXNG.md for setup.
 search:
-  searxng_url: http://searxng:8080   # service name on the shared docker network
-  default_lang: pt-BR     # language passed to SearXNG
+  searxng_url: http://searxng:8080   # service name on the shared docker network;
+                                     # only used when provider=searxng
+  default_lang: pt-BR     # language passed to the search backend
   # Which search backend to use:
-  #   "searxng" (default): aggregates through the SearXNG instance above
-  #   "forage": Forage's own SERP engines (browser render + DOM parse),
+  #   "forage" (default): Forage's own SERP engines (browser render + DOM parse),
   #             no SearXNG needed. Order matters: engines run in this order,
   #             the first one alone, extra engines in parallel when needed.
-  provider: searxng
+  #   "searxng": aggregates through the SearXNG instance above
+  provider: forage
   # provider=forage: list of SERP engines, in order of preference.
-  # Valid: google, bing, yahoo, duckduckgo (alias: ddg).
+  # Valid: google, bing, yahoo, duckduckgo (alias: ddg), brave.
   # A failing engine is skipped; the next engine covers the shortfall.
-  # To enable the own browsers engines use:
-  #   provider: forage
-  #   engines: [google, bing, yahoo]
-  engines: [google, bing, brave, startpage]
+  # To aggregate through SearXNG instead use:
+  #   provider: searxng
+  #   engines: [google, bing, brave, startpage]
+  engines: [google, bing, duckduckgo, brave]
   timeout: 15              # seconds per search (provider=searxng)
   serp_timeout: 20         # seconds per SERP render (provider=forage)
 
@@ -202,13 +203,36 @@ browser:
   # cdp_url: "http://172.20.0.1:9222"   # required for engine=chrome-local (or obscura)
   # Per-search-engine browser overrides (provider=forage only). Map a search
   # engine to a browser engine OR an ordered fallback chain (list): if the
-  # first browser hits an anti-bot challenge, the next one is tried.
+  # first browser hits an anti-bot challenge, the next one is tried. Only
+  # playwright/patchright are honored here; use browser.search.cdp_url for a
+  # CDP browser (see browser.search below).
   # search_engine_overrides:
-  #   google: [scrapling, chrome-local]   # scrapling first; host Chrome as fallback
+  #   google: [playwright, patchright]
   min_idle: 1              # browsers kept warm at boot (standby; scrapling keeps a session)
   max_instances: 5         # pool ceiling (parallel URL extraction)
   idle_timeout: 60         # seconds idle before an instance is closed
-  headless: true
+  headless: true           # EXTRACT browser: headless by default
+  # Search browser (provider=forage only). Independent from the extract
+  # browser above and applied only to SERP rendering. Opened at the start of a
+  # search, closed at the end of it: no idle browser between searches.
+  search:
+    headless: false        # SEARCH defaults to headful: headless Chromium is
+                           # answered with an anti-bot page by Google on the
+                           # first request. A virtual display (Xvfb) is started
+                           # automatically by the app when this is false.
+    local: true            # use the browser shipped in the container
+    cdp_url: ""            # CDP endpoint (e.g. http://172.20.0.1:9222). When set
+                           # (or when browser.cdp_url is set) CDP WINS over local.
+                           # The remote browser is never closed by Forage.
+    engine: playwright     # local mode: playwright (default) or patchright
+    humanize: true         # mouse move + small scroll before each SERP render
+    min_interval: 5.0      # seconds between SERP renders (jittered). Search
+                           # engines answer a burst with an anti-bot page even
+                           # when the browser looks fine.
+    retries: 2             # per-engine retries when the render is classified as
+                           # an anti-bot page, before moving to the next engine
+    retry_backoff: 6.0     # seconds between those retries
+    settle_ms: 1200        # extra wait after the results start rendering
   launch_timeout: 30       # seconds to launch a new instance
   stealth: true            # hide automation signals (anti-bot); ON by default
   network_idle_timeout: 5  # seconds; cap for networkidle wait (streaming pages never idle)

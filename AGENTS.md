@@ -21,16 +21,21 @@ Single Python service (FastAPI + uvicorn), one container. Modules in `app/`:
 
 | Module | Responsibility |
 |---|---|
-| `main.py` | FastAPI app, endpoints, pool lifespan, auth dependency |
+| `main.py` | FastAPI app, native endpoints, service functions (`run_search`/`run_extract`), pool lifespan, auth dependency |
 | `config.py` | YAML loader: defaults -> deep merge -> validation; typed dataclasses |
 | `cache.py` | Thread-safe TTL LRU cache (search and extract), `clear()` for purge |
 | `searxng.py` | SearXNG client (`/search?format=json`) -> Hermes envelope |
+| `serp.py` | Own SERP engines (provider=forage): render + DOM parse per search engine |
 | `extract.py` | Hybrid extraction heuristic (static -> browser), SPA/challenge detection |
-| `browser.py` | In-process Chromium pool (playwright/patchright) OR single Scrapling session; semaphore, cleanup, page_action |
+| `browser.py` | In-process Chromium pool (playwright/patchright) OR single Scrapling session; semaphore, cleanup, page_action; `SearchBrowser` for SERP renders |
+| `display.py` | Virtual display (Xvfb) for a headful browser: start on demand, reuse, stale-lock recovery |
+| `firecrawl.py` | Firecrawl compatibility layer: `POST /v1/scrape`, `POST /v1/search` on top of `run_extract`/`run_search` |
 | `documents.py` | PDF/docx/xlsx/pptx/rtf extraction from raw bytes (never through the browser) |
 | `auth.py` | Bearer API keys (env `FORAGE_API_KEYS`), constant-time comparison |
 
-API: `GET /health`, `POST /search`, `POST /extract`, `POST /admin/cache/purge`.
+API: `GET /health`, `POST /search`, `POST /extract`,
+`POST /admin/cache/purge`, plus the Firecrawl-compatible `POST /v1/scrape` and
+`POST /v1/search`.
 
 ## Core design decisions (do not reverse without a strong reason)
 
@@ -93,6 +98,28 @@ API: `GET /health`, `POST /search`, `POST /extract`, `POST /admin/cache/purge`.
 - A URL that could not be extracted returns `{url, error}`.
 - `method` is one of `static`, `browser`, `browser+solver`, `browser+readability`,
   or a document method (pdf/docx/xlsx/pptx/rtf).
+
+### Firecrawl compatibility layer (`app/firecrawl.py`)
+
+- `POST /v1/scrape` and `POST /v1/search` speak Firecrawl's contract, not the
+  Hermes one. They are a *thin adapter*: they call `run_extract`/`run_search`
+  from `main.py` (shared caches included) and only translate the envelope.
+  Never reimplement extraction there, and never bypass the shared services.
+- Success: `{"success": true, "data": {..., "metadata": {...}}}`. Failure:
+  `{"success": false, "code": <Firecrawl code>, "error": msg}` with HTTP 400
+  (bad request), 408 (`SCRAPE_TIMEOUT`) or 500 (`SCRAPE_ALL_ENGINES_FAILED`).
+- Use only codes from Firecrawl's own `ErrorCodes` enum. An invented code is
+  worse than a generic one: clients switch on those strings.
+- A page no engine could extract is HTTP 500 + `SCRAPE_ALL_ENGINES_FAILED`,
+  same as Firecrawl. Clients key on it to fall back to their own renderer.
+- Unknown request fields must NOT produce 422 (`extra="allow"`): Firecrawl's
+  body has many optional fields, and a client sending one of them deserves the
+  page, not a rejection. List the ignored ones in `data.warning`.
+- Formats served: `markdown` (default), `html`, `rawHtml`. Never fake an
+  unsupported format (`json`, `summary`, `screenshot`, `links`, `actions`):
+  the docs page says what is not implemented and why.
+- Firecrawl v1 `/search` returns `data` as an ARRAY; v2 returns an object.
+  Forage speaks v1.
 
 ## Configuration
 
@@ -165,6 +192,24 @@ override.
 - **Sites vary between runs**: anti-bot is intermittent (stackoverflow, tiktok,
   ebay). A failure in one benchmark round is not a regression; re-test isolated
   before concluding.
+- **Headless Chromium is flagged by Google on the first request**: playwright,
+  patchright and scrapling headless all land on `/sorry/` immediately, while
+  the same builds headful (on an Xvfb display) render the SERP. The search
+  browser is headful by default for that reason; the extract browser stays
+  headless (it is a fallback path, and headful costs ~2.5x the memory).
+- **A SERP burst is flagged even when the browser looks fine**: 10 renders back
+  to back returned 0 usable pages, while the same renders spaced out returned
+  10 of 10. Hence the process-wide pacer (`browser.search.min_interval`) plus
+  in-place retries, instead of spending another browser engine on the first
+  challenge.
+- **A challenged SERP usually succeeds on the next attempt**: retrying the same
+  browser after a backoff recovers, while switching browser engines costs a
+  full launch. Retry first, switch later.
+- **Xvfb leaves `/tmp/.X<n>-lock` behind when it dies** (container restart).
+  The next start fails with "Server is already active for display n"; a stale
+  lock (no Xvfb process behind it) has to be removed first. `app/display.py`
+  does that, and reuses an Xvfb that is already running (one display serves
+  every uvicorn worker).
 
 ## Testing
 
@@ -183,6 +228,10 @@ curl -s -X POST http://localhost:3672/extract -H 'Content-Type: application/json
 # Force browser (x.com)
 curl -s -X POST http://localhost:3672/extract -H 'Content-Type: application/json' \
   -d '{"urls":["https://x.com/OpenAI"]}'
+
+# Firecrawl compatibility (same request shape a Firecrawl client sends)
+curl -s -X POST http://localhost:3672/v1/scrape -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com","formats":["markdown"]}'
 ```
 
 Reference validation set (regression baseline): Wikipedia/GitHub/docs = static;
@@ -199,16 +248,25 @@ content >= 100 chars, non-empty title).
   specific.
 - License: GPL v3 (see LICENSE). Docs/README in English, no personal data.
 - Credits in the README follow the project convention.
-- No semantic version bump per feature while the project is in testing phase;
-  version only when leaving testing (owner decides).
-- Do not commit on every change: the owner asks for consolidated commits.
+- Semantic versioning. Shipping a feature does not by itself change the
+  version: releases are cut deliberately. Releasing = bump `app/__init__.py`,
+  add the CHANGELOG entry, commit, then `git tag -a vX.Y.Z` and push the tag;
+  `.github/workflows/release.yml` builds the image, pushes it to
+  `ghcr.io/<owner>/forage` and opens the GitHub Release. The workflow refuses
+  to run when the tag does not match `app/__init__.py`.
+- Keep commits consolidated: one commit per coherent change, not one per edit.
+- `docker-compose.yml` references the published image and keeps `build: .`, so
+  a local build and a pulled image are interchangeable.
 
 ## Docs map
 
 - `README.md` — what it is, quickstart, API reference
+- `CHANGELOG.md` — notable changes per release (Keep a Changelog)
 - `docs/CONFIG.md` — every config key
+- `docs/FIRECRAWL.md` — Firecrawl compatibility: mappings, error codes, non-goals
 - `docs/CHROME_LOCAL.md` — host desktop Chrome engine (chrome-local) setup and pitfalls
 - `docs/SEARXNG.md` — SearXNG install + docker network pitfalls
 - `docs/HERMES.md` — integration with the Hermes agent
 - `docs/BENCHMARK.md` — engine comparison tables
 - `config.example.yaml` — default configuration (keep in sync with CONFIG.md)
+- `.github/workflows/release.yml` — tag -> GHCR image + GitHub Release

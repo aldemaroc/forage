@@ -36,9 +36,9 @@ DEFAULTS: Dict[str, Any] = {
     "search": {
         "searxng_url": "http://searxng:8080",
         "default_lang": "pt-BR",
-        "engines": ["google", "bing", "brave", "startpage"],
+        "engines": ["google", "bing", "duckduckgo", "brave"],
         "timeout": 15,
-        "provider": "searxng",           # "searxng" (default) or "forage" (own SERP engines)
+        "provider": "forage",             # "forage" (default; own SERP engines) or "searxng"
         "serp_timeout": 20,               # provider=forage: seconds per SERP render
     },
     "extract": {
@@ -63,6 +63,23 @@ DEFAULTS: Dict[str, Any] = {
         "max_instances": 5,
         "idle_timeout": 60,
         "headless": True,
+        "search": {
+            # Browser that renders the SERP pages (only used when
+            # search.provider=forage). Independent from the extract browser:
+            # search defaults to headful, because headless Chromium is flagged
+            # as automation by Google on the very first request. The instance
+            # is opened at the start of a search and closed at the end of it.
+            "headless": False,
+            "local": True,          # allow the browser shipped in the container
+            "cdp_url": "",          # when set (or browser.cdp_url), CDP wins over local
+            "engine": "playwright",
+            "humanize": True,       # mouse move + small scroll before each SERP
+            "min_interval": 5.0,    # seconds between SERP renders (jittered)
+            "retries": 2,           # per-engine retries when classified as a challenge
+            "retry_backoff": 6.0,
+            "settle_ms": 1200,      # extra wait after the results start rendering
+            "user_agent": None,
+        },
         "launch_timeout": 30,
         "stealth": True,
         "network_idle_timeout": 5,
@@ -166,6 +183,34 @@ class ExtractConfig:
 
 
 @dataclass(frozen=True)
+class SearchBrowserConfig:
+    """Browser used to render SERP pages (``search.provider=forage``).
+
+    Deliberately separate from the extract browser:
+
+    - search defaults to **headful**. Headless Chromium (playwright,
+      patchright and scrapling alike) is answered with an anti-bot page by
+      Google on the first request; a headful browser on a virtual display
+      renders the SERP normally.
+    - the browser is **opened per search and closed at the end of it**, so
+      there is no idle browser holding memory between searches.
+    - ``cdp_url`` (falling back to ``browser.cdp_url``) points at an existing
+      Chrome over CDP. When both CDP and ``local`` are configured, CDP wins.
+    """
+
+    headless: bool = False
+    local: bool = True
+    cdp_url: str = ""
+    engine: str = "playwright"  # local mode: playwright or patchright
+    humanize: bool = True
+    min_interval: float = 5.0
+    retries: int = 2
+    retry_backoff: float = 6.0
+    settle_ms: int = 1200
+    user_agent: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class BrowserConfig:
     engine: str = "playwright"  # "playwright" (default), "patchright", "scrapling" or "obscura"
     cdp_url: str = ""  # engine=obscura: CDP endpoint (http://host:port or ws://host:port)
@@ -173,6 +218,7 @@ class BrowserConfig:
     max_instances: int = 5
     idle_timeout: int = 60
     headless: bool = True
+    search: SearchBrowserConfig = field(default_factory=SearchBrowserConfig)
     launch_timeout: int = 30
     stealth: bool = True
     network_idle_timeout: int = 5
@@ -231,7 +277,12 @@ class ForageConfig:
                     ),
                 }
             ),
-            browser=BrowserConfig(**browser),
+            browser=BrowserConfig(
+                **{
+                    **{k: v for k, v in browser.items() if k != "search"},
+                    "search": SearchBrowserConfig(**browser.get("search", {})),
+                }
+            ),
             auth=AuthConfig(**auth),
             source_path=source_path,
         )
@@ -278,6 +329,26 @@ class ForageConfig:
                 f"search.serp_timeout deve estar entre 1 e 120s: {self.search.serp_timeout}"
             )
         valid_browsers = ("playwright", "patchright", "scrapling", "obscura", "chrome-local")
+        sb = self.browser.search
+        if sb.engine not in ("playwright", "patchright"):
+            raise ValueError(
+                f"browser.search.engine inválido: {sb.engine} "
+                "(use playwright ou patchright; scrapling/obscura/chrome-local não "
+                "se aplicam ao browser de busca)"
+            )
+        if sb.min_interval < 0:
+            raise ValueError(f"browser.search.min_interval deve ser >= 0: {sb.min_interval}")
+        if sb.retries < 0:
+            raise ValueError(f"browser.search.retries deve ser >= 0: {sb.retries}")
+        if sb.retry_backoff < 0:
+            raise ValueError(f"browser.search.retry_backoff deve ser >= 0: {sb.retry_backoff}")
+        if sb.settle_ms < 0:
+            raise ValueError(f"browser.search.settle_ms deve ser >= 0: {sb.settle_ms}")
+        if not sb.local and not (sb.cdp_url or self.browser.cdp_url):
+            raise ValueError(
+                "browser.search.local=false exige browser.search.cdp_url "
+                "(ou browser.cdp_url)"
+            )
         for se, be in self.browser.search_engine_overrides.items():
             chain = be if isinstance(be, (list, tuple)) else [be]
             for b in chain:

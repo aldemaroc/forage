@@ -1,5 +1,11 @@
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.title="Forage" \
+      org.opencontainers.image.description="Self-hosted web search & extract service: one container, Hermes API plus a Firecrawl-compatible /v1/scrape" \
+      org.opencontainers.image.source="https://github.com/aldemaroc/forage" \
+      org.opencontainers.image.url="https://github.com/aldemaroc/forage" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+
 WORKDIR /srv/forage
 
 # Dependencies first (layer caching). Playwright downloads Chromium + system deps.

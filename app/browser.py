@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import pathlib
+import random as _random
 import time
 from collections import deque
 from typing import Any, Deque, Dict, Optional, Union
@@ -649,3 +651,246 @@ class BrowserPool:
                     pass
             if to_close:
                 logger.info("Browser pool: closed %d idle instances", len(to_close))
+
+
+# ---------------------------------------------------------------------------
+# SERP browser (search.provider=forage)
+# ---------------------------------------------------------------------------
+
+
+class SerpPacer:
+    """Process-wide minimum interval between SERP renders.
+
+    Search engines answer a burst of queries with an anti-bot page even when
+    the browser itself looks fine (measured against Google: 10 renders back to
+    back, 0 usable pages; the same renders spaced out, 10 of 10). The pacer
+    serializes renders and enforces ``browser.search.min_interval``, with a
+    small random jitter so the cadence is not a fixed metronome.
+
+    Shared by every SERP browser instance of the process, so concurrent
+    searches cannot burst either.
+    """
+
+    def __init__(self) -> None:
+        self._lock: Optional[asyncio.Lock] = None
+        self._next_at = 0.0
+
+    async def wait(self, min_interval: float) -> None:
+        if min_interval <= 0:
+            return
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            now = time.monotonic()
+            delay = self._next_at - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+            jitter = (min_interval * 0.25) * _random.random()
+            self._next_at = time.monotonic() + min_interval + jitter
+
+
+SERP_PACER = SerpPacer()
+
+
+class SearchBrowser:
+    """One-shot browser for SERP rendering.
+
+    Opened when a search starts and closed when it ends: no idle browser sits
+    in memory between searches, and the whole search (all engines, all
+    pagination) runs inside one browser session, so cookies and history
+    accumulate the way they do for a human.
+
+    Two modes, resolved from the config:
+
+    - **cdp**: connect to ``browser.search.cdp_url`` (falling back to
+      ``browser.cdp_url``) and render on the real Chrome already running
+      there. Pages opened by us are closed at the end; the remote browser is
+      never closed. When both CDP and local are configured, CDP wins.
+    - **local**: launch the browser shipped in the container (playwright or
+      patchright), headful by default (an Xvfb display is started by
+      ``app.display``), and close it at the end.
+
+    Usage (one instance per search request)::
+
+        async with SearchBrowser(config.browser) as browser:
+            html = await browser.render(url, timeout=20)
+    """
+
+    def __init__(self, browser_config: Any) -> None:
+        self.settings = browser_config.search
+        self.cdp_url = (self.settings.cdp_url or browser_config.cdp_url or "").strip()
+        self.mode = "cdp" if self.cdp_url else ("local" if self.settings.local else "")
+        self.headless = self.settings.headless
+        self.stealth = browser_config.stealth
+        self.launch_timeout = browser_config.launch_timeout
+        self.user_agent = self.settings.user_agent or browser_config.search.user_agent or DEFAULT_BROWSER_UA
+        self.engine = self.settings.engine
+        self._pw: Optional[Any] = None
+        self._browser: Optional[Any] = None
+        self._context: Optional[Any] = None
+        self._page: Optional[Any] = None
+        self._owns_context = False
+        self._render_lock: Optional[asyncio.Lock] = None
+        self.started = False
+
+    # -- lifecycle ---------------------------------------------------------
+
+    async def start(self) -> None:
+        if not self.mode:
+            raise RuntimeError(
+                "search browser disabled: set browser.search.local=true or "
+                "browser.search.cdp_url"
+            )
+        if self.headless is False and not os.environ.get("DISPLAY") and self.mode == "local":
+            # No display available (headful requested but Xvfb could not
+            # start): degrade to headless instead of failing every search.
+            logger.error(
+                "Headful search requested but no DISPLAY is available: "
+                "falling back to headless (expect anti-bot pages)"
+            )
+            self.headless = True
+        await self._launch()
+        self.started = True
+        logger.info(
+            "Search browser ready (mode=%s engine=%s headless=%s)",
+            self.mode, self.engine if self.mode == "local" else "-", self.headless,
+        )
+
+    async def _launch(self) -> None:
+        if self.engine == "patchright":
+            from patchright.async_api import async_playwright
+        else:
+            from playwright.async_api import async_playwright
+
+        self._pw = await async_playwright().start()
+        if self.mode == "cdp":
+            self._browser = await self._pw.chromium.connect_over_cdp(
+                endpoint_url=self.cdp_url,
+                timeout=self.launch_timeout * 1000,
+            )
+            # Use the browser's real profile (cookies, trust, no incognito).
+            # A fresh incognito context is exactly what anti-bot systems flag.
+            if self._browser.contexts:
+                self._context = self._browser.contexts[0]
+                self._owns_context = False
+            else:
+                self._context = await self._browser.new_context(user_agent=self.user_agent)
+                self._owns_context = True
+        else:
+            args = ["--no-sandbox", "--disable-dev-shm-usage"]
+            if self.stealth:
+                args.append("--disable-blink-features=AutomationControlled")
+            self._browser = await self._pw.chromium.launch(
+                headless=self.headless,
+                timeout=self.launch_timeout * 1000,
+                args=args,
+            )
+            self._context = await self._browser.new_context(
+                user_agent=self.user_agent,
+                locale="pt-BR",
+                viewport={"width": 1366, "height": 768},
+            )
+            self._owns_context = True
+        self._page = await self._context.new_page()
+        # The stealth init script is only for the browsers we launch: on a
+        # real Chrome profile it would ADD an automation fingerprint.
+        if self.stealth and self.mode == "local":
+            await self._page.add_init_script(STEALTH_INIT_SCRIPT)
+
+    async def stop(self) -> None:
+        for closer in (self._page, self._context if self._owns_context else None):
+            if closer is None:
+                continue
+            try:
+                await closer.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._page = None
+        self._context = None
+        # A CDP browser belongs to whoever is running it: disconnect only.
+        if self._pw is not None:
+            try:
+                await self._pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        self._pw = None
+        self._browser = None
+        self.started = False
+
+    async def __aenter__(self) -> "SearchBrowser":
+        await self.start()
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        await self.stop()
+
+    # -- rendering ---------------------------------------------------------
+
+    async def use_engine(self, engine: str) -> None:
+        """Switch the local browser engine, relaunching if needed.
+
+        No-op in CDP mode (the engine is whatever is behind the CDP endpoint)
+        and when the engine is already active.
+        """
+        if self.mode != "local" or engine == self.engine:
+            return
+        logger.info("Search browser: switching engine %s -> %s", self.engine, engine)
+        await self.stop()
+        self.engine = engine
+        await self._launch()
+        self.started = True
+
+    async def render(
+        self,
+        url: str,
+        timeout: int = 30,
+        engine: Optional[str] = None,
+        wait_for: Optional[str] = None,
+    ) -> str:
+        """Render one SERP and return its HTML.
+
+        Applies the process-wide pacer, a human-ish pre-navigation gesture and
+        the results settle wait. The page is reused across renders of the same
+        search.
+        """
+        if not self.started or self._page is None:
+            raise RuntimeError("Search browser not started")
+        if self._render_lock is None:
+            self._render_lock = asyncio.Lock()
+        # One page per search: renders are serialized here even when the
+        # caller fires engines in parallel, because they share that page.
+        async with self._render_lock:
+            if engine:
+                await self.use_engine(engine)
+            await SERP_PACER.wait(self.settings.min_interval)
+            if self.settings.humanize:
+                await self._humanize()
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            # Wait for the element that only shows up once the results are
+            # rendered (per engine; "h3" is the generic fallback), then let the
+            # remaining results settle. No results at all is a valid answer,
+            # so the wait is best-effort.
+            try:
+                await self._page.wait_for_selector(
+                    wait_for or "h3", timeout=min(timeout, 10) * 1000
+                )
+            except Exception:  # noqa: BLE001 (best-effort: no results is valid)
+                pass
+            if self.settings.settle_ms:
+                await self._page.wait_for_timeout(self.settings.settle_ms)
+            return await self._page.content()
+
+    async def _humanize(self) -> None:
+        """Mouse movement, a small scroll and a short dwell before navigating.
+
+        Renders that jump straight to the next URL, with no pointer movement
+        and no dwell time, are the pattern search engines flag: measured
+        against Google, the same renders with a gesture hold up.
+        """
+        try:
+            await self._page.mouse.move(300, 200, steps=8)
+            await self._page.mouse.move(900, 480, steps=12)
+            await self._page.mouse.wheel(0, 200)
+            await self._page.wait_for_timeout(400)
+        except Exception:  # noqa: BLE001
+            pass

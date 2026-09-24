@@ -1,0 +1,101 @@
+name: Release
+
+# Cutting a release is one command:
+#
+#   git tag -a v1.0.0 -m "Forage 1.0.0" && git push origin v1.0.0
+#
+# This workflow then builds the image, pushes it to GitHub Container Registry
+# and opens the GitHub Release with generated notes. The tag is the single
+# source of truth: there is no version to bump in a file before tagging beyond
+# app/__init__.py (which the release notes are checked against).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create the GitHub Release
+  packages: write   # push to ghcr.io
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # Add linux/arm64 here to publish a multi-arch manifest.
+  PLATFORMS: linux/amd64
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check the tag against app/__init__.py
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' app/__init__.py)
+          echo "tag=$tag code=$code"
+          if [ "$tag" != "$code" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match app/__init__.py ($code)"
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: ${{ env.PLATFORMS }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # No attestation manifests: keep the image manifest plain so every
+          # client (including older Compose/containerd setups) can pull it.
+          provenance: false
+          sbom: false
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            Container image: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}`
+
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ```
+
+            Ephemeral test run:
+
+            ```bash
+            docker run --rm -p 127.0.0.1:3672:3672 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            curl http://localhost:3672/health
+            ```
+
+            Building from source stays the same: `docker compose up -d --build`.

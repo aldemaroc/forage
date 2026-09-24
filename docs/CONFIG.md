@@ -38,9 +38,9 @@ Bypass per request with the `Cache-Control: no-cache` header; the response heade
 |---|---|---|
 | `searxng_url` | `http://searxng:8080` | Base URL of the SearXNG instance. On Docker, use the service name on the shared network (see docs/SEARXNG.md). Only used when `provider: searxng`. |
 | `default_lang` | `pt-BR` | Language passed to SearXNG / used as `hl`/`setlang` on the SERP URLs (provider=forage). |
-| `engines` | `[google, bing, brave, startpage]` | Engine list. With `provider: searxng` it is the SearXNG engine filter. With `provider: forage` it is the ordered list of Forage's own SERP engines (valid: `google`, `bing`, `yahoo`, `duckduckgo` / alias `ddg`). Order matters: the first engine runs alone; the rest are queried only when it fails or the limit is not met, and then in parallel. |
+| `engines` | `[google, bing, duckduckgo, brave]` | Engine list. With `provider: forage` it is the ordered list of Forage's own SERP engines (valid: `google`, `bing`, `yahoo`, `duckduckgo` / alias `ddg`, `brave`). Order matters: the first engine runs alone; the rest are queried only when it fails or the limit is not met, and then in parallel. With `provider: searxng` it is the SearXNG engine filter. |
 | `timeout` | `15` | Timeout in seconds per search request (provider=searxng). |
-| `provider` | `searxng` | Search backend. `searxng` aggregates through the SearXNG instance; `forage` uses Forage's own SERP engines (browser render + DOM parse per engine, no SearXNG needed). Each engine's result is classified `ok` / `no_results` / `error` (challenge, timeout, http, network or parse), so a CAPTCHA page is never mistaken for an empty answer and vice versa. |
+| `provider` | `forage` | Search backend. `forage` (default) uses Forage's own SERP engines (browser render + DOM parse per engine, no SearXNG needed); `searxng` aggregates through the SearXNG instance. Each engine's result is classified `ok` / `no_results` / `error` (challenge, timeout, http, network or parse), so a CAPTCHA page is never mistaken for an empty answer and vice versa. |
 | `serp_timeout` | `20` | Seconds per SERP render (provider=forage). |
 
 ## `extract`
@@ -102,11 +102,11 @@ otherwise                                                 → static result
 |---|---|---|
 | `engine` | `playwright` | Browser engine: `playwright` (default), `patchright` (anti-detection fork of Playwright, same API), `scrapling` (fingerprint impersonation + Cloudflare Turnstile bypass) or `chrome-local` (the host's real desktop Chrome via CDP, used to pass anti-bot that blocks every headless browser, e.g. Google's "unusual traffic" challenge). Switching engine only needs a config change and `docker compose restart`. |
 | `cdp_url` | `""` | CDP endpoint for `engine: chrome-local` (or the experimental `obscura`). For the host Chrome it is `http://172.20.0.1:9222` (the Docker gateway, see `docs/CHROME_LOCAL.md`). |
-| `search_engine_overrides` | `{}` | Provider=forage only. Maps a search engine id (`google`, `bing`, `yahoo`, `duckduckgo`) to a browser engine id or an **ordered list** used as a fallback chain: if the first browser hits an anti-bot challenge / error, the next one is tried. Example `google: [scrapling, chrome-local]` renders Google with scrapling first and falls back to the host Chrome when Google shows a CAPTCHA. |
+| `search_engine_overrides` | `{}` | Provider=forage only. Maps a search engine id (`google`, `bing`, `yahoo`, `duckduckgo`) to a browser engine id or an **ordered list** used as a fallback chain: if one browser is answered with an anti-bot page, the next one is tried. Only `playwright`/`patchright` are honored (they are the engines that can be launched per search); `scrapling` keeps a session of its own and `obscura`/`chrome-local` are CDP endpoints, configured for search as a whole through `browser.search.cdp_url`. Example `google: [playwright, patchright]`. |
 | `min_idle` | `1` | Browsers kept warm at boot (standby). `0` = lazy (launch on demand). |
 | `max_instances` | `5` | Pool ceiling; also the browser concurrency bound for parallel URL extraction. |
 | `idle_timeout` | `60` | Seconds an idle instance stays alive before it is closed. |
-| `headless` | `true` | Run Chromium headless. |
+| `headless` | `true` | **Extract** browser: run Chromium headless. The search browser has its own `browser.search.headless`. |
 | `launch_timeout` | `30` | Seconds to launch a new instance. |
 | `stealth` | `true` | Hide automation signals (anti-bot). Adds `--disable-blink-features=AutomationControlled`, an init script masking `navigator.webdriver`/`chrome`/`languages`/`plugins`, and a real Chrome UA. |
 | `network_idle_timeout` | `5` | Seconds cap for the `networkidle` wait during render. Pages with streaming/websockets (e.g. X) never go idle, so this cap bounds the render time; lower it for faster worst-case extraction, raise it if pages need more time to hydrate via XHR. |
@@ -114,6 +114,34 @@ otherwise                                                 → static result
 | `challenge_timeout` | `15` | Max seconds to wait for a Cloudflare/Turnstile challenge to auto-resolve after load. Only used by the `scrapling` engine (polling inside `page_action`). |
 | `solve_cloudflare` | `false` | `scrapling` engine only. `false` (default) uses Forage's own title-poll in `page_action`, which resolves non-interactive challenges with no fixed cost. `true` uses Scrapling's built-in solver, which handles interactive challenges but waits ~5s for networkidle on every page before detecting. |
 | `fallback_solver` | `true` | On any anti-bot failure (challenge detected, any engine), retry the page with the scrapling built-in solver as a last resort. The ~5s/page solver cost is paid only when a challenge is actually detected, turning would-be failures into successes. |
+
+### `browser.search` (provider=forage)
+
+Renders the SERP pages. Deliberately separate from the extract browser, and
+never touched by `/extract`:
+
+- **headful by default.** Headless Chromium (playwright, patchright, scrapling)
+  is answered with Google's anti-bot page on the first request; a headful
+  browser renders normally. When `headless: false`, the app starts Xvfb itself
+  (see `app/display.py`); no Docker flags or extra services are needed.
+- **opened per search, closed at the end of it.** There is no idle search
+  browser holding memory between searches, and all engines of one search share
+  the same session, so cookies and history accumulate.
+- **rate limited.** `min_interval` serializes renders process-wide with a
+  jitter, and a render classified as an anti-bot page is retried in place.
+
+| Key | Default | Description |
+|---|---|---|
+| `headless` | `false` | Run the search browser headless. `false` (default) needs a display: Xvfb is started automatically. |
+| `local` | `true` | Allow the browser shipped in the container (playwright/patchright launched by Forage). |
+| `cdp_url` | `""` | CDP endpoint to render through (e.g. `http://172.20.0.1:9222`). Falls back to `browser.cdp_url`. **When set, CDP wins over `local`.** Pages opened by Forage are closed at the end; the remote browser is never closed. |
+| `engine` | `playwright` | Local mode only: `playwright` or `patchright`. |
+| `humanize` | `true` | Mouse move, a small scroll and a short dwell before navigating to the next SERP. Renders that jump straight to the next URL with no pointer movement are the pattern search engines flag. |
+| `min_interval` | `5.0` | Seconds between SERP renders, process-wide, plus up to 25% jitter. Search engines answer a burst with an anti-bot page even when the browser looks fine. `0` disables the pacing. |
+| `retries` | `2` | Per-engine retries when a render is classified as an anti-bot page, before moving to the next engine of the chain. |
+| `retry_backoff` | `6.0` | Seconds between those retries. |
+| `settle_ms` | `1200` | Extra wait after the results start rendering (the render also waits for the first `h3`). |
+| `user_agent` | `null` | Override the browser UA (`null` = the built-in desktop Chrome UA). |
 
 ## `auth`
 
