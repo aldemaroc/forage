@@ -71,17 +71,11 @@ The container runs its own Chromium as a subprocess. It never touches any extern
 
 ## Quick start
 
-The image ships its own default config, so the first run needs nothing but Docker.
+### 1. Install it (persistent)
 
-1. **Run the published image** (no clone, no config file):
-
-```bash
-docker run --rm -p 127.0.0.1:3672:3672 ghcr.io/aldemaroc/forage:1.0.0
-curl http://localhost:3672/health
-# → {"status":"ok","service":"forage","version":"1.0.0",...}
-```
-
-2. **For a persistent setup**, clone and configure:
+Clone the repo and create the two files the compose expects. Both are required
+before `up`: the compose mounts `config.yaml` (without it Docker creates a
+directory in its place) and reads `.env`.
 
 ```bash
 git clone https://github.com/aldemaroc/forage.git
@@ -90,22 +84,33 @@ cp config.example.yaml config.yaml   # behavior: port, cache, search, browser, .
 cp .env.example .env                 # secrets: FORAGE_API_KEYS, TZ
 ```
 
-Both files are required before `up`: the compose mounts `config.yaml` (without it Docker creates a directory in its place) and reads `.env`.
-
-3. **Start it with the published image** (nothing to build):
+Start it with the published image (nothing to build):
 
 ```bash
 docker compose pull                  # ghcr.io/aldemaroc/forage:1.0.0, also tagged 1.0, 1, latest
 docker compose up -d
 ```
 
-To build from source instead, run `docker compose up -d --build`: it skips the pull and tags the local build with the published name, so both paths are interchangeable.
+To build from source instead, run `docker compose up -d --build`: it skips the
+pull and tags the local build with the published name, so the two paths are
+interchangeable. Changing `config.yaml` afterwards needs `docker compose
+restart`; new code needs `up -d --build`.
 
-4. **Search works out of the box.** With the default `search.provider: forage` the SERPs are rendered in Forage's own browser, in the same container: no SearXNG, no shared network, nothing else to start. Only if you would rather delegate search to SearXNG, set `search.provider: searxng` and follow [docs/SEARXNG.md](docs/SEARXNG.md) (it includes the `docker-compose.override.yml` that joins Forage to the SearXNG network).
+Search works out of the box. With the default `search.provider: forage` the
+SERPs are rendered in Forage's own browser, in the same container: no SearXNG,
+no shared network, nothing else to start. To delegate search to SearXNG
+instead, set `search.provider: searxng` and follow
+[docs/SEARXNG.md](docs/SEARXNG.md), which includes the
+`docker-compose.override.yml` that joins Forage to the SearXNG network. Every
+config key is in [docs/CONFIG.md](docs/CONFIG.md).
 
-5. **Try it**
+Check that it answers, then call it:
 
 ```bash
+# Health
+curl http://localhost:3672/health
+# → {"status":"ok","service":"forage","version":"1.0.0",...}
+
 # Search
 curl -s -X POST http://localhost:3672/search -H 'Content-Type: application/json' \
   -d '{"query":"proxmox server","limit":3}'
@@ -127,18 +132,54 @@ curl -s -X POST http://localhost:3672/v1/scrape -H 'Content-Type: application/js
   -d '{"url":"https://example.com","formats":["markdown"]}'
 ```
 
-## Integrating with Hermes Agent
+### 2. Wire it into Hermes Agent
 
-Forage ships with a Hermes plugin. See **[docs/HERMES.md](docs/HERMES.md)** for full instructions (plugin install, env vars, backend switch, auth).
+Forage ships the Hermes plugin in this repo. Copy it, enable it, point Hermes
+at the service and restart the gateway:
 
-There are two supported setups:
+```bash
+cp -r plugins/web/forage ~/.hermes/plugins/web/forage
+hermes plugins enable web/forage
+
+# ~/.hermes/.env
+FORAGE_URL=http://localhost:3672
+# FORAGE_API_KEY=...        only when auth is enabled on Forage
+# FORAGE_BYPASS_CACHE=true  optional: always bypass Forage's cache
+
+hermes config set web.search_backend forage
+hermes config set web.extract_backend forage
+systemctl --user restart hermes-gateway   # or however you run the gateway
+```
+
+`web_search` and `web_extract` then run through Forage. There are two supported
+setups:
 
 | Setup | `web.search_backend` | `web.extract_backend` |
 |---|---|---|
 | **Everything through Forage** | `forage` | `forage` |
 | **Forage extract + direct SearXNG search** | `searxng` | `forage` |
 
-The second option skips one hop for search (Hermes → SearXNG directly), at the cost of losing Forage's search cache.
+The second skips one hop for search (Hermes talks to SearXNG directly) at the
+cost of losing Forage's search cache.
+
+Full instructions, including auth, the `forage_full_extract` tool and the
+plugin's internals: **[docs/HERMES.md](docs/HERMES.md)**.
+
+### 3. Bonus: try it without installing anything
+
+The image carries its own default config, so it runs on its own:
+
+```bash
+docker run --rm --name forage -p 127.0.0.1:3672:3672 ghcr.io/aldemaroc/forage:1.0.0
+curl http://localhost:3672/health
+# → {"status":"ok","service":"forage","version":"1.0.0",...}
+```
+
+That is a throwaway container: it is removed when you stop it (`--rm`), it uses
+the config baked into the image, and nothing survives it. Good for a look or a
+smoke test on a machine you do not want to set up; for real use, do steps 1 and
+2. To try a different config in this mode, mount one:
+`-v ./config.yaml:/etc/forage/config.yaml:ro`.
 
 ## API Reference
 
