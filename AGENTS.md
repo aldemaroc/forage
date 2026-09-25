@@ -211,7 +211,20 @@ override.
   challenge.
 - **A challenged SERP usually succeeds on the next attempt**: retrying the same
   browser after a backoff recovers, while switching browser engines costs a
-  full launch. Retry first, switch later.
+  full launch. Retry first, switch later. This holds for the **primary** engine
+  only: a fallback engine is called with `retries=0`, because a fallback that
+  fails must hand the search to the next engine instead of spending the budget
+  on its own retries (two failed fallback attempts cost more than the three
+  successful renders before them).
+- **Fallback engines are queried one at a time, stopping at the limit.** They
+  share one page and one pacer, so the renders are serialized regardless; the
+  parallel `asyncio.gather` that used to fire them all only produced renders
+  whose results were discarded once the limit was met.
+- **The results-selector wait is capped at 4 s, not the request timeout.** A
+  SERP that never renders the selector is a challenge or an empty page, and
+  waiting longer only delays the next engine. Server-rendered engines
+  (google/bing/yahoo/ddg) carry the selector in the initial DOM; only SPAs need
+  longer, and those are not in the default chain.
 - **Xvfb leaves `/tmp/.X<n>-lock` behind when it dies** (container restart).
   The next start fails with "Server is already active for display n"; a stale
   lock (no Xvfb process behind it) has to be removed first. `app/display.py`

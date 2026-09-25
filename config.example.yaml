@@ -41,11 +41,14 @@ search:
   provider: forage
   # provider=forage: list of SERP engines, in order of preference.
   # Valid: google, bing, yahoo, duckduckgo (alias: ddg), brave.
-  # A failing engine is skipped; the next engine covers the shortfall.
+  # A failing engine is skipped; the next engine covers the shortfall, and the
+  # search stops as soon as `limit` is reached. Brave is kept out of the
+  # default: its anti-bot answers a rendered SERP with a captcha far more often
+  # than the others, so it is only worth adding if you need it.
   # To aggregate through SearXNG instead use:
   #   provider: searxng
   #   engines: [google, bing, brave, startpage]
-  engines: [google, bing, duckduckgo, brave]
+  engines: [google, bing, duckduckgo]
   timeout: 15              # seconds per search (provider=searxng)
   serp_timeout: 20         # seconds per SERP render (provider=forage)
 
@@ -226,7 +229,7 @@ browser:
                            # The remote browser is never closed by Forage.
     engine: playwright     # local mode: playwright (default) or patchright
     humanize: true         # mouse move + small scroll before each SERP render
-    min_interval: 5.0      # seconds between SERP renders (jittered). Search
+    min_interval: 2.5      # seconds between SERP renders (jittered). Search
                            # engines answer a burst with an anti-bot page even
                            # when the browser looks fine.
     retries: 2             # per-engine retries when the render is classified as

@@ -38,7 +38,7 @@ Bypass per request with the `Cache-Control: no-cache` header; the response heade
 |---|---|---|
 | `searxng_url` | `http://searxng:8080` | Base URL of the SearXNG instance. On Docker, use the service name on the shared network (see docs/SEARXNG.md). Only used when `provider: searxng`. |
 | `default_lang` | `pt-BR` | Language passed to SearXNG / used as `hl`/`setlang` on the SERP URLs (provider=forage). |
-| `engines` | `[google, bing, duckduckgo, brave]` | Engine list. With `provider: forage` it is the ordered list of Forage's own SERP engines (valid: `google`, `bing`, `yahoo`, `duckduckgo` / alias `ddg`, `brave`). Order matters: the first engine runs alone; the rest are queried only when it fails or the limit is not met, and then in parallel. With `provider: searxng` it is the SearXNG engine filter. |
+| `engines` | `[google, bing, duckduckgo]` | Engine list. With `provider: forage` it is the ordered list of Forage's own SERP engines (valid: `google`, `bing`, `yahoo`, `duckduckgo` / alias `ddg`, `brave`). Order matters: the first engine runs alone; the next ones are queried only when it fails or the limit is not met, one at a time, stopping as soon as `limit` is reached. Brave is implemented but kept out of the default (its anti-bot answers a rendered SERP with a captcha far more often than the others). With `provider: searxng` it is the SearXNG engine filter. |
 | `timeout` | `15` | Timeout in seconds per search request (provider=searxng). |
 | `provider` | `forage` | Search backend. `forage` (default) uses Forage's own SERP engines (browser render + DOM parse per engine, no SearXNG needed); `searxng` aggregates through the SearXNG instance. Each engine's result is classified `ok` / `no_results` / `error` (challenge, timeout, http, network or parse), so a CAPTCHA page is never mistaken for an empty answer and vice versa. |
 | `serp_timeout` | `20` | Seconds per SERP render (provider=forage). |
@@ -128,7 +128,13 @@ never touched by `/extract`:
   browser holding memory between searches, and all engines of one search share
   the same session, so cookies and history accumulate.
 - **rate limited.** `min_interval` serializes renders process-wide with a
-  jitter, and a render classified as an anti-bot page is retried in place.
+  jitter. A render classified as an anti-bot page is retried in place on the
+  primary engine; a fallback engine is not retried, it just hands over to the
+  next one.
+- **one render at a time, on purpose.** All engines of a search share one page,
+  so the renders are serialized. Parallel SERP hits from the same IP are the
+  pattern that gets a captcha; the extra engines are queried one at a time and
+  only while the limit has not been reached.
 
 | Key | Default | Description |
 |---|---|---|
@@ -137,8 +143,8 @@ never touched by `/extract`:
 | `cdp_url` | `""` | CDP endpoint to render through (e.g. `http://172.20.0.1:9222`). Falls back to `browser.cdp_url`. **When set, CDP wins over `local`.** Pages opened by Forage are closed at the end; the remote browser is never closed. |
 | `engine` | `playwright` | Local mode only: `playwright` or `patchright`. |
 | `humanize` | `true` | Mouse move, a small scroll and a short dwell before navigating to the next SERP. Renders that jump straight to the next URL with no pointer movement are the pattern search engines flag. |
-| `min_interval` | `5.0` | Seconds between SERP renders, process-wide, plus up to 25% jitter. Search engines answer a burst with an anti-bot page even when the browser looks fine. `0` disables the pacing. |
-| `retries` | `2` | Per-engine retries when a render is classified as an anti-bot page, before moving to the next engine of the chain. |
+| `min_interval` | `2.5` | Seconds between SERP renders, process-wide, plus up to 25% jitter. Search engines answer a burst with an anti-bot page even when the browser looks fine. `0` disables the pacing. |
+| `retries` | `2` | Retries for the **primary** engine when a render is classified as an anti-bot page. Fallback engines are not retried: a fallback that fails hands the search over to the next engine instead of spending the budget on its own retries. |
 | `retry_backoff` | `6.0` | Seconds between those retries. |
 | `settle_ms` | `1200` | Extra wait after the results start rendering (the render also waits for the first `h3`). |
 | `user_agent` | `null` | Override the browser UA (`null` = the built-in desktop Chrome UA). |

@@ -36,7 +36,7 @@ DEFAULTS: Dict[str, Any] = {
     "search": {
         "searxng_url": "http://searxng:8080",
         "default_lang": "pt-BR",
-        "engines": ["google", "bing", "duckduckgo", "brave"],
+        "engines": ["google", "bing", "duckduckgo"],
         "timeout": 15,
         "provider": "forage",             # "forage" (default; own SERP engines) or "searxng"
         "serp_timeout": 20,               # provider=forage: seconds per SERP render
@@ -74,7 +74,7 @@ DEFAULTS: Dict[str, Any] = {
             "cdp_url": "",          # when set (or browser.cdp_url), CDP wins over local
             "engine": "playwright",
             "humanize": True,       # mouse move + small scroll before each SERP
-            "min_interval": 5.0,    # seconds between SERP renders (jittered)
+            "min_interval": 2.5,    # seconds between SERP renders (jittered)
             "retries": 2,           # per-engine retries when classified as a challenge
             "retry_backoff": 6.0,
             "settle_ms": 1200,      # extra wait after the results start rendering
@@ -203,7 +203,7 @@ class SearchBrowserConfig:
     cdp_url: str = ""
     engine: str = "playwright"  # local mode: playwright or patchright
     humanize: bool = True
-    min_interval: float = 5.0
+    min_interval: float = 2.5
     retries: int = 2
     retry_backoff: float = 6.0
     settle_ms: int = 1200

@@ -869,10 +869,15 @@ class SearchBrowser:
             # Wait for the element that only shows up once the results are
             # rendered (per engine; "h3" is the generic fallback), then let the
             # remaining results settle. No results at all is a valid answer,
-            # so the wait is best-effort.
+            # so the wait is best-effort. The cap is short on purpose: a SERP
+            # that never renders the selector is a challenge or an empty page,
+            # and waiting the full request timeout on it only delays the next
+            # engine. Server-rendered engines (google/bing/yahoo/ddg) have the
+            # selector in the initial DOM; only SPAs need longer, and those are
+            # not in the default chain.
             try:
                 await self._page.wait_for_selector(
-                    wait_for or "h3", timeout=min(timeout, 10) * 1000
+                    wait_for or "h3", timeout=min(timeout, 4) * 1000
                 )
             except Exception:  # noqa: BLE001 (best-effort: no results is valid)
                 pass

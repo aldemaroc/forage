@@ -17,9 +17,12 @@ The orchestration lives in ``search_forage()`` and follows these rules:
   the next engine in the list.
 * When the requested limit exceeds what one engine returns (e.g. Google
   caps the first SERP at 10), the next engines are queried automatically.
-* Whenever more than one engine is used for the same query, they run in
-  parallel (``asyncio.gather``); the browser pool semaphore bounds the
-  concurrency to ``browser.max_instances``.
+* Whenever more than one engine is used for the same query, they are queried
+  one at a time, in the configured order, and the search stops as soon as the
+  requested limit is met. SERP renders are serialized anyway (one page, one
+  pacer), so querying every engine up front only wastes renders. Only the
+  primary engine retries a challenged render; a fallback that fails hands the
+  search over to the next engine.
 * Every engine result is classified with certainty: ``ok`` (results were
   found and parsed), ``no_results`` (the engine answered and genuinely had
   nothing), or ``error`` (challenge / timeout / http / network / parse).
@@ -422,6 +425,7 @@ async def _fetch_engine(
     query: str,
     limit: int,
     language: str,
+    retries: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Render one SERP and parse it. Returns {status, results, error_type, error}.
 
@@ -434,13 +438,16 @@ async def _fetch_engine(
     (``browser.search.retries`` with ``retry_backoff`` seconds between tries)
     before the next browser engine is spent: measured against Google, a
     challenged render usually succeeds on the next attempt, while switching
-    browser engines costs a full launch.
+    browser engines costs a full launch. ``retries`` overrides the configured
+    count: fallback engines are called with 0, because a fallback that fails
+    must hand over to the next engine instead of spending the search budget on
+    its own retries.
     """
     spec = SERP_ENGINE_SPECS[engine]
     url = spec["build"](query, language, limit)
     failures: List[str] = []
     chain: List[Optional[str]] = [None] if getattr(browser, "mode", "local") == "cdp" else list(browser_chain)
-    retries = max(0, int(config.browser.search.retries))
+    retries = max(0, int(config.browser.search.retries if retries is None else retries))
     backoff = max(0.0, float(config.browser.search.retry_backoff))
 
     for browser_engine in chain:
@@ -545,22 +552,26 @@ async def search_forage(
     statuses[first] = st
     _ingest(st.get("results", []))
 
-    # 2. Extra engines only when needed (failed or limit not reached), in parallel.
-    if len(collected) < limit and len(names) > 1:
+    # 2. Extra engines only when needed (the first one failed or did not reach
+    # the limit), one at a time and stopping as soon as the limit is met.
+    # Renders are serialized anyway (one page, one pacer), so firing every
+    # engine up front only adds renders whose results get thrown away.
+    for name in names[1:]:
+        if len(collected) >= limit:
+            break
         need = limit - len(collected)
-        rest = await asyncio.gather(
-            *(
-                _fetch_engine(
-                    config, browser, chain_for(name), name, query, max(PAGE_SIZE, need), lang
-                )
-                for name in names[1:]
-            )
+        st_rest = await _fetch_engine(
+            config,
+            browser,
+            chain_for(name),
+            name,
+            query,
+            max(PAGE_SIZE, need),
+            lang,
+            retries=0,
         )
-        for name, st_rest in zip(names[1:], rest):
-            statuses[name] = st_rest
-            _ingest(st_rest.get("results", []))
-            if len(collected) >= limit:
-                break  # gather already launched all; just stop ingesting
+        statuses[name] = st_rest
+        _ingest(st_rest.get("results", []))
 
     collected = collected[:limit]
     for idx, r in enumerate(collected):

@@ -5,6 +5,36 @@ Notable changes per release. The format follows
 [semantic versioning](https://semver.org/): releases before 1.0.0 were the
 testing phase, and their history lives in the commit log.
 
+## [1.0.1] - 2026-09-24
+
+Search latency and diagnostics follow-up to 1.0.0.
+
+### Changed
+
+- **Fallback engines are queried one at a time, stopping at the limit.** All
+  engines of a search share one page and one pacer, so the renders were
+  serialized anyway; firing every engine up front only produced renders whose
+  results were thrown away once the limit was already met.
+- **Only the primary engine retries a challenged render.** A fallback answered
+  with an anti-bot page now hands the search to the next engine instead of
+  spending the search budget on its own retries (measured: two failed fallback
+  attempts cost more than the three successful renders before them).
+- **The results-selector wait is capped at 4 s** (was 10 s). A SERP that never
+  renders the selector is a challenge or an empty page, and waiting longer only
+  delayed the next engine.
+- **`browser.search.min_interval` defaults to `2.5`** (was `5.0`). Verified
+  against Google: five consecutive searches spaced by 2.5 s, five usable SERPs.
+- **`brave` is out of the default `search.engines`** (`[google, bing,
+  duckduckgo]`). The engine stays implemented and can be re-added by name; it
+  is the one whose anti-bot answers a rendered SERP with a captcha most often.
+
+### Fixed
+
+- **`data.engines` reports every engine that was queried.** Hitting the limit
+  stopped the collection loop before the status of engines already consulted
+  was recorded, so the diagnostics omitted engines that had actually run (and
+  the time they cost).
+
 ## [1.0.0] - 2026-09-24
 
 First tagged release: the API, the configuration surface and the container
