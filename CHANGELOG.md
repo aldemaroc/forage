@@ -5,6 +5,31 @@ Notable changes per release. The format follows
 [semantic versioning](https://semver.org/): releases before 1.0.0 were the
 testing phase, and their history lives in the commit log.
 
+## [Unreleased]
+
+### Fixed
+
+- **A wedged scrapling session no longer hangs the extract endpoint.** The
+  shared session's `fetch()` had no wall-clock cap: once the browser behind it
+  stopped answering, the request never returned, the HTTP client gave up first
+  (Hermes reported `Could not reach Forage at http://localhost:3672`) and the
+  semaphore slot was never released, so further renders queued behind it. Every
+  scrapling fetch now runs under `asyncio.wait_for` with a hard cap of
+  `effective timeout + browser.render_timeout_grace` (20 s by default) and a
+  blown cap raises `RenderTimeout`, which the caller turns into a fast error
+  item.
+
+### Added
+
+- **The shared scrapling session is recycled on a budget**
+  (`browser.session_max_renders`, default 200 renders, and
+  `browser.session_max_age`, default 6 h) and immediately after a blown hard
+  cap, since a wedged session does not recover on its own. Recycling is
+  deferred while other renders are in flight so it never breaks them, and it
+  costs well under a second.
+- `browser.render_timeout_grace`, `browser.session_max_renders` and
+  `browser.session_max_age` in `docs/CONFIG.md` and `config.example.yaml`.
+
 ## [1.0.1] - 2026-09-24
 
 Search latency and diagnostics follow-up to 1.0.0.

@@ -251,6 +251,13 @@ browser:
   fallback_solver: true    # on any anti-bot failure (any engine), retry the page with the
                            # scrapling built-in solver as a last resort. Costs ~5s/page only
                            # when a challenge is detected; turns failures into successes
+  render_timeout_grace: 20 # hard wall-clock cap on top of the per-URL timeout. scrapling's
+                           # own timeout only bounds navigation: a wedged session can hang
+                           # forever and hold a pool slot. With the cap the render fails fast.
+                           # 0 disables it
+  session_max_renders: 200 # recycle the shared scrapling session after N renders (it
+                           # degrades silently with use); 0 = never
+  session_max_age: 21600   # recycle it after N seconds of uptime (6h); 0 = never
 
 # --- Auth (optional) ------------------------------------------
 # API keys come from env: FORAGE_API_KEYS (comma separated)

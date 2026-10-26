@@ -227,6 +227,9 @@ class BrowserConfig:
     solve_cloudflare: bool = False  # scrapling: use its built-in Cloudflare solver (adds ~5s/page) or the page_action poll (default)
     fallback_solver: bool = True  # on anti-bot failure, retry with scrapling + built-in solver as last resort
     search_engine_overrides: dict = field(default_factory=dict)  # search engine -> browser engine (provider=forage)
+    render_timeout_grace: int = 20  # hard wall-clock cap on top of the per-URL timeout (a wedged browser must fail, not hang)
+    session_max_renders: int = 200  # recycle the shared scrapling session after N renders
+    session_max_age: int = 21600  # recycle the shared scrapling session after N seconds (6h)
 
 
 @dataclass(frozen=True)

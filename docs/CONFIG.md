@@ -114,6 +114,9 @@ otherwise                                                 → static result
 | `challenge_timeout` | `15` | Max seconds to wait for a Cloudflare/Turnstile challenge to auto-resolve after load. Only used by the `scrapling` engine (polling inside `page_action`). |
 | `solve_cloudflare` | `false` | `scrapling` engine only. `false` (default) uses Forage's own title-poll in `page_action`, which resolves non-interactive challenges with no fixed cost. `true` uses Scrapling's built-in solver, which handles interactive challenges but waits ~5s for networkidle on every page before detecting. |
 | `fallback_solver` | `true` | On any anti-bot failure (challenge detected, any engine), retry the page with the scrapling built-in solver as a last resort. The ~5s/page solver cost is paid only when a challenge is actually detected, turning would-be failures into successes. |
+| `render_timeout_grace` | `20` | Hard wall-clock cap added on top of the per-URL timeout. scrapling's own `timeout` only bounds page navigation: a wedged session can return from `fetch()` never, which hangs the HTTP request and keeps its semaphore slot forever. With the cap the render fails fast (`RenderTimeout`) and the caller returns an error item. `0` disables the cap. |
+| `session_max_renders` | `200` | Recycle the shared scrapling session after this many renders. A long-lived session degrades silently with use (see `render_timeout_grace`), and recreation costs well under a second. `0` disables. |
+| `session_max_age` | `21600` | Recycle the shared scrapling session after this many seconds of uptime (6h by default). `0` disables. |
 
 ### `browser.search` (provider=forage)
 

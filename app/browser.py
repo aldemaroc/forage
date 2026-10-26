@@ -83,6 +83,15 @@ def _is_dead_browser(exc: BaseException) -> bool:
     return "has been closed" in msg or "target page" in msg or "browser has been closed" in msg
 
 
+class RenderTimeout(RuntimeError):
+    """A browser render exceeded its hard wall-clock cap.
+
+    Raised instead of waiting forever: the caller turns it into a fast error
+    item, so the HTTP client gets an answer (and the semaphore is released)
+    even when the underlying browser stopped responding.
+    """
+
+
 class BrowserPool:
     """In-process browser pool for Forage.
 
@@ -118,6 +127,16 @@ class BrowserPool:
         # Explicit browser UA wins; otherwise fall back to a real Chrome UA
         # (a bot UA would be a giveaway against anti-bot systems).
         self.user_agent = user_agent or DEFAULT_BROWSER_UA
+        # A long-lived scrapling session degrades silently (see
+        # _recycle_scrapling_session), so it is recycled on a budget and every
+        # fetch runs under a hard wall-clock cap.
+        self.render_timeout_grace = getattr(browser_config, "render_timeout_grace", 20)
+        self.session_max_renders = getattr(browser_config, "session_max_renders", 200)
+        self.session_max_age = getattr(browser_config, "session_max_age", 21600)
+        self._scrapling_renders = 0
+        self._scrapling_started = time.monotonic()
+        self._inflight = 0  # renders currently using the shared session
+        self._recycle_pending = False  # recycle requested while busy
         self._idle: Deque[tuple[float, Any]] = deque()  # (last_used, browser)
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._pw: Optional[Any] = None
@@ -152,6 +171,8 @@ class BrowserPool:
                 useragent=self.user_agent,
             )
             await self._scrapling_session.start()
+            self._scrapling_started = time.monotonic()
+            self._scrapling_renders = 0
             self._semaphore = asyncio.Semaphore(self.max_instances)
             self._started = True
             logger.info("Scrapling session ready (max_pages=%d)", self.max_instances)
@@ -422,7 +443,7 @@ class BrowserPool:
                     pass
             self._semaphore.release()
 
-    async def _restart_scrapling_session(self) -> None:
+    async def _restart_scrapling_session(self, reason: str = "browser death") -> None:
         """Recreate the scrapling session after its browser died.
 
         Under heavy load the StealthyFetcher's internal browser can be closed
@@ -448,7 +469,102 @@ class BrowserPool:
                 useragent=self.user_agent,
             )
             await self._scrapling_session.start()
-            logger.warning("Scrapling session recreated after browser death")
+            self._scrapling_started = time.monotonic()
+            self._scrapling_renders = 0
+            logger.warning("Scrapling session recreated (%s)", reason)
+
+    async def _recycle_scrapling_session(self, reason: str) -> None:
+        """Recycle the shared scrapling session without breaking in-flight work.
+
+        A session that has served a lot of pages stops answering: fetch() never
+        returns, which hangs the request behind it and keeps its semaphore slot
+        forever. There is no pool-level health signal for that, so the session
+        is recycled on a render/time budget and whenever a render blows the
+        hard cap. Closing it while other renders are using it would fail those
+        requests, so the recycle is deferred to the next idle render.
+        """
+        if self._inflight > 1:
+            self._recycle_pending = True
+            logger.info(
+                "Scrapling session recycle deferred (%d renders in flight): %s",
+                self._inflight,
+                reason,
+            )
+            return
+        await self._restart_scrapling_session(reason)
+
+    async def _reset_solver_session(self, reason: str) -> None:
+        """Drop the lazy solver session so the next retry builds a fresh one."""
+        async with self._solver_lock:
+            if self._solver_session is not None:
+                try:
+                    await self._solver_session.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._solver_session = None
+            logger.warning("Scrapling solver session reset (%s)", reason)
+
+    async def _scrapling_call(
+        self,
+        session: Any,
+        url: str,
+        *,
+        timeout: int,
+        wait_selector: Optional[str],
+        page_action: Any,
+        label: str,
+        solver: bool = False,
+    ) -> Any:
+        """Run one scrapling fetch under a hard wall-clock cap.
+
+        scrapling's own ``timeout`` only bounds page navigation; when the
+        underlying browser wedges the call never comes back, so the cap is
+        enforced here and a wedged session is replaced.
+        """
+        cap = max(1, timeout) + max(0, self.render_timeout_grace)
+
+        async def _fetch() -> Any:
+            return await asyncio.wait_for(
+                session.fetch(
+                    url,
+                    timeout=timeout * 1000,
+                    wait_selector=wait_selector,
+                    page_action=page_action,
+                ),
+                timeout=cap,
+            )
+
+        try:
+            resp = await _fetch()
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "%s render of %s hit the hard cap (%ss); dropping the session",
+                label,
+                url,
+                cap,
+            )
+            if solver:
+                await self._reset_solver_session(f"hard timeout after {cap}s")
+            else:
+                await self._recycle_scrapling_session(f"hard timeout after {cap}s")
+            raise RenderTimeout(f"render timed out after {cap}s")
+        except Exception as exc:  # noqa: BLE001
+            if not _is_dead_browser(exc):
+                raise
+            # The session's browser died (heavy load). Recreate it and retry
+            # once instead of failing the request.
+            if solver:
+                await self._reset_solver_session("browser died")
+                session = await self._get_solver_session()
+            else:
+                await self._restart_scrapling_session("browser died")
+                session = self._scrapling_session
+            if session is None:
+                raise
+            resp = await _fetch()
+        if not solver:
+            self._scrapling_renders += 1
+        return resp
 
     async def _scrapling_render(
         self,
@@ -503,33 +619,39 @@ class BrowserPool:
                     result["article"] = None
 
         await self._semaphore.acquire()
+        self._inflight += 1
         try:
-            try:
-                resp = await self._scrapling_session.fetch(
-                    url,
-                    timeout=timeout * 1000,
-                    wait_selector=wait_for or None,
-                    page_action=_page_action,
+            if self._recycle_pending:
+                self._recycle_pending = False
+                await self._recycle_scrapling_session("deferred recycle")
+            elif (
+                self.session_max_renders > 0
+                and self._scrapling_renders >= self.session_max_renders
+            ) or (
+                self.session_max_age > 0
+                and time.monotonic() - self._scrapling_started >= self.session_max_age
+            ):
+                await self._recycle_scrapling_session(
+                    f"budget reached ({self._scrapling_renders} renders, "
+                    f"{int(time.monotonic() - self._scrapling_started)}s)"
                 )
-            except Exception as exc:  # noqa: BLE001
-                if _is_dead_browser(exc):
-                    # The session's browser died (heavy load). Recreate the
-                    # session and retry once instead of failing the request.
-                    await self._restart_scrapling_session()
-                    resp = await self._scrapling_session.fetch(
-                        url,
-                        timeout=timeout * 1000,
-                        wait_selector=wait_for or None,
-                        page_action=_page_action,
-                    )
-                else:
-                    raise
+            if self._scrapling_session is None:
+                raise RuntimeError("Scrapling session not started or disabled")
+            resp = await self._scrapling_call(
+                self._scrapling_session,
+                url,
+                timeout=timeout,
+                wait_selector=wait_for or None,
+                page_action=_page_action,
+                label="scrapling",
+            )
             if readability and result.get("article"):
                 return result["article"]
             if resp is None or not resp.body:
                 raise RuntimeError(f"Empty response for {url}")
             return resp.body.decode("utf-8", errors="ignore")
         finally:
+            self._inflight -= 1
             self._semaphore.release()
 
     async def _get_solver_session(self) -> Any:
@@ -589,11 +711,14 @@ class BrowserPool:
 
         await self._semaphore.acquire()
         try:
-            resp = await session.fetch(
+            resp = await self._scrapling_call(
+                session,
                 url,
-                timeout=timeout * 1000,
+                timeout=timeout,
                 wait_selector=wait_for or None,
                 page_action=_page_action,
+                label="scrapling solver",
+                solver=True,
             )
             if resp is None or not resp.body:
                 raise RuntimeError(f"Empty response for {url}")
