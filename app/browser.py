@@ -80,7 +80,12 @@ def _parse_readability(raw: Optional[str]) -> Optional[dict]:
 def _is_dead_browser(exc: BaseException) -> bool:
     """True when the scrapling browser died (session must be recreated)."""
     msg = str(exc).lower()
-    return "has been closed" in msg or "target page" in msg or "browser has been closed" in msg
+    return (
+        "has been closed" in msg
+        or "target page" in msg
+        or "browser has been closed" in msg
+        or "is closed" in msg
+    )
 
 
 class BrowserPool:
