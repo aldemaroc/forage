@@ -23,7 +23,7 @@ from .cache import TTLCache
 from .config import load_config
 from .display import ensure_display, stop_display
 from .extract import extract_url
-from .firecrawl import build_firecrawl_router
+from .firecrawl import API_PREFIXES, build_firecrawl_routers
 from .searxng import search_searxng
 from .serp import search_forage
 
@@ -120,7 +120,10 @@ app = FastAPI(
     version=__version__,
     description=(
         "Self-hosted web search & extract service for Hermes, with a "
-        "Firecrawl-compatible API (POST /v1/scrape, POST /v1/search)."
+        "Firecrawl-compatible API served under every prefix in "
+        "app.firecrawl.API_PREFIXES (POST /v1/scrape, POST /v1/search, and the "
+        "same routes under /v2, where /v2/search uses Firecrawl v2's grouped "
+        "{'web': [...]} data envelope)."
     ),
     lifespan=lifespan,
 )
@@ -164,7 +167,9 @@ async def run_search(
     """Search through the configured provider, with cache.
 
     Returns ``(payload, cache_state)``. Used by ``POST /search`` and by the
-    Firecrawl-compatible ``POST /v1/search``.
+    Firecrawl-compatible ``POST /v1/search`` and ``POST /v2/search``: both
+    prefixes share this one implementation and the same cache entries, and only
+    the Firecrawl envelope wrapped around the result differs by version.
     """
     cache_enabled = config.cache.enabled and config.cache.search.enabled and not bypass_cache
     key = _search_cache_key(query, limit, language, engines)
@@ -217,7 +222,8 @@ async def run_extract(
 
     Returns ``(results, cache_state)``, one result dict per URL and in the
     input order. Used by ``POST /extract`` and by the Firecrawl-compatible
-    ``POST /v1/scrape``.
+    ``POST /v1/scrape`` and ``POST /v2/scrape``: both prefixes hit the same
+    extraction path and the same cache.
     """
     cache_enabled = config.cache.enabled and config.cache.extract.enabled and not bypass_cache
     key = _extract_cache_key(urls, force_render, wait_for, fmt, engine)
@@ -265,6 +271,7 @@ async def health() -> dict:
         "config_source": config.source_path,
         "browser_engine": config.browser.engine,
         "search_provider": config.search.provider,
+        "firecrawl_prefixes": list(API_PREFIXES),
         "search_browser": {
             "mode": "cdp" if (config.browser.search.cdp_url or config.browser.cdp_url) else
                     ("local" if config.browser.search.local else "disabled"),
@@ -341,13 +348,18 @@ async def purge_cache(_auth: None = Depends(require_auth)) -> dict:
     return {"cleared": cleared}
 
 
-app.include_router(
-    build_firecrawl_router(
-        run_extract=run_extract,
-        run_search=run_search,
-        require_auth=require_auth,
-    )
-)
+# Firecrawl-compatible surface, mounted once per version prefix from one shared
+# set of route implementations: /v2/scrape is identical to /v1/scrape, and
+# /v2/search is /v1/search with Firecrawl's v2 grouped data envelope
+# ({"web": [...]}). See app.firecrawl.API_PREFIXES.
+for firecrawl_router in build_firecrawl_routers(
+    run_extract=run_extract,
+    run_search=run_search,
+    require_auth=require_auth,
+    prefixes=API_PREFIXES,
+):
+    logger.info("Mounting Firecrawl-compatible API at %s", firecrawl_router.prefix)
+    app.include_router(firecrawl_router)
 
 
 if __name__ == "__main__":
