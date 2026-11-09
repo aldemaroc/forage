@@ -87,7 +87,7 @@ cp .env.example .env                 # secrets: FORAGE_API_KEYS, TZ
 Start it with the published image (nothing to build):
 
 ```bash
-docker compose pull                  # ghcr.io/aldemaroc/forage:1.0.0, also tagged 1.0, 1, latest
+docker compose pull                  # ghcr.io/aldemaroc/forage:1.1.0, also tagged 1.1, 1, latest
 docker compose up -d
 ```
 
@@ -109,7 +109,7 @@ Check that it answers, then call it:
 ```bash
 # Health
 curl http://localhost:3672/health
-# → {"status":"ok","service":"forage","version":"1.0.0",...}
+# → {"status":"ok","service":"forage","version":"1.1.0",...}
 
 # Search
 curl -s -X POST http://localhost:3672/search -H 'Content-Type: application/json' \
@@ -170,9 +170,9 @@ plugin's internals: **[docs/HERMES.md](docs/HERMES.md)**.
 The image carries its own default config, so it runs on its own:
 
 ```bash
-docker run --rm --name forage -p 127.0.0.1:3672:3672 ghcr.io/aldemaroc/forage:1.0.0
+docker run --rm --name forage -p 127.0.0.1:3672:3672 ghcr.io/aldemaroc/forage:1.1.0
 curl http://localhost:3672/health
-# → {"status":"ok","service":"forage","version":"1.0.0",...}
+# → {"status":"ok","service":"forage","version":"1.1.0",...}
 ```
 
 That is a throwaway container: it is removed when you stop it (`--rm`), it uses
@@ -362,12 +362,12 @@ the Scrapling built-in solver as a last resort; the final `method` is
 ## Releases
 
 Container images are published to GitHub Container Registry and every tag has
-a GitHub Release. Available tags: the exact version (`1.0.0`), `1.0`, `1`, and
+a GitHub Release. Available tags: the exact version (`1.1.0`), `1.1`, `1`, and
 `latest` (the latter not for pre-releases).
 
 ```bash
-docker pull ghcr.io/aldemaroc/forage:1.0.0
-docker run --rm -p 127.0.0.1:3672:3672 ghcr.io/aldemaroc/forage:1.0.0
+docker pull ghcr.io/aldemaroc/forage:1.1.0
+docker run --rm -p 127.0.0.1:3672:3672 ghcr.io/aldemaroc/forage:1.1.0
 curl http://localhost:3672/health
 ```
 
@@ -383,8 +383,8 @@ single source of truth, and the workflow refuses to run when it does not match
 ```bash
 # 1. bump app/__init__.py and add the CHANGELOG entry, then commit
 # 2. tag and push
-git tag -a v1.0.1 -m "Forage 1.0.1"
-git push origin v1.0.1
+git tag -a v1.1.0 -m "Forage 1.1.0"
+git push origin v1.1.0
 ```
 
 The workflow then builds the image, pushes it to `ghcr.io/<owner>/forage` and

@@ -5,7 +5,10 @@ Notable changes per release. The format follows
 [semantic versioning](https://semver.org/): releases before 1.0.0 were the
 testing phase, and their history lives in the commit log.
 
-## [Unreleased]
+## [1.1.0] - 2026-11-09
+
+A SearXNG-compatible read API, plus the container fix that keeps the search
+path alive over weeks of uptime.
 
 ### Fixed
 
