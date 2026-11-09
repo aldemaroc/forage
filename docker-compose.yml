@@ -8,6 +8,13 @@ services:
     image: ghcr.io/aldemaroc/forage:1.0.0
     container_name: forage
     restart: always
+    # PID 1 = docker-init (tini), not the python app: every /search launches a
+    # one-shot Chromium whose helper processes (2x chrome_crashpad_handler,
+    # 2x zygote) get orphaned and re-parented to PID 1. Without an init that
+    # calls wait(), they pile up as zombies and each one keeps holding a PID
+    # slot in the container cgroup until the task ceiling (systemd's
+    # DefaultTasksMax) is hit and Chromium can no longer spawn threads.
+    init: true
     ports:
       - "127.0.0.1:3672:3672"   # host-only bind: nothing external reaches it
     volumes:

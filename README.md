@@ -284,6 +284,28 @@ accepted, ignored and listed in `data.warning` rather than rejected.
 `POST /v1/search` speaks the v1 shape (`data` as an array). Full matrix,
 mappings and non-goals: **[docs/FIRECRAWL.md](docs/FIRECRAWL.md)**.
 
+### SearXNG compatibility: `GET /search`
+
+The same port also answers SearXNG's read API, so a client that only knows
+SearXNG as a search provider (LibreChat, most self-hosted chat UIs) can point
+its instance URL at Forage:
+
+```bash
+curl -s "http://localhost:3672/search?q=proxmox&format=json&language=pt-BR"
+```
+
+```json
+{ "query": "proxmox", "results": [ { "url": "...", "title": "...", "content": "...", "engine": "google", "score": 1.0, "category": "general" } ],
+  "answers": [], "corrections": [], "infoboxes": [], "suggestions": [], "unresponsive_engines": [] }
+```
+
+`GET /` serves the same search (SearXNG exposes both paths). `format=json` is
+the only format (anything else is 403, like a SearXNG instance with the format
+disabled), `categories` is `general` only, `pageno` is page 1 only, and
+`time_range`/`safesearch` are accepted and ignored. The native `POST /search`
+keeps its own Hermes-shaped contract. Parameters, approximations and the
+LibreChat recipe: **[docs/SEARXNG-API.md](docs/SEARXNG-API.md)**.
+
 ## Configuration
 
 All behavior is driven by `config.yaml` (bind-mounted read-only into the container) and env vars for secrets. Every option is documented in **[docs/CONFIG.md](docs/CONFIG.md)**. Here is the shape:
@@ -380,7 +402,7 @@ the workflow.
 curl -s -X POST http://localhost:3672/search -H 'Content-Type: application/json' -d '{"query":"test","limit":3}'
 ```
 
-The app lives in `app/` (FastAPI): config loading, caching, the SearXNG client, the own-SERP engine (`serp.py`), the virtual display, the hybrid extractor, the browser pool, the Firecrawl-compatible router and auth are each in their own module.
+The app lives in `app/` (FastAPI): config loading, caching, the SearXNG client, the own-SERP engine (`serp.py`), the virtual display, the hybrid extractor, the browser pool, the Firecrawl-compatible router, the SearXNG-compatible router and auth are each in their own module.
 
 ## License
 

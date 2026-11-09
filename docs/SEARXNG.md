@@ -1,5 +1,9 @@
 # Setting up SearXNG for Forage (optional)
 
+> This page is about Forage **calling** a SearXNG instance. The opposite
+> direction, Forage **answering** SearXNG's API so SearXNG-only clients can use
+> it as their search backend, is **[docs/SEARXNG-API.md](SEARXNG-API.md)**.
+
 Forage can delegate search to [SearXNG](https://github.com/searxng/searxng), a privacy-respecting metasearch engine that aggregates Google, Bing, Brave, etc. without API keys.
 
 > **SearXNG is optional.** Since 1.0.0 the default is `search.provider: forage`: Forage renders the SERPs itself, in its own browser, in the same container, and the stack in `docker-compose.yml` runs alone with no extra network. Use this guide only if you would rather keep a SearXNG instance in front of the engines.

@@ -25,6 +25,7 @@ from .display import ensure_display, stop_display
 from .extract import extract_url
 from .firecrawl import API_PREFIXES, build_firecrawl_routers
 from .searxng import search_searxng
+from .searxng_compat import build_searxng_router
 from .serp import search_forage
 
 config = load_config()
@@ -360,6 +361,14 @@ for firecrawl_router in build_firecrawl_routers(
 ):
     logger.info("Mounting Firecrawl-compatible API at %s", firecrawl_router.prefix)
     app.include_router(firecrawl_router)
+
+# SearXNG-compatible read surface: GET /search and GET / answer with SearXNG's
+# query parameters and JSON envelope, over the same run_search (same engines,
+# same browser, same caches). Clients that only speak SearXNG as a search
+# provider can point their instance URL at Forage. The native POST /search
+# keeps its Hermes-shaped contract. See docs/SEARXNG-API.md.
+app.include_router(build_searxng_router(run_search=run_search, config=config))
+logger.info("Mounting SearXNG-compatible API at GET /search and GET /")
 
 
 if __name__ == "__main__":

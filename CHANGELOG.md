@@ -9,6 +9,18 @@ testing phase, and their history lives in the commit log.
 
 ### Fixed
 
+- **The compose file runs the container with an init process (`init: true`).**
+  Every one-shot search browser leaves Chromium helper processes
+  (`chrome_crashpad_handler`, `zygote`) that get re-parented to PID 1 when the
+  browser closes. With the app as PID 1 nothing called `wait()`, so they piled
+  up as zombies at roughly 4-5 per search, each one still holding a task slot
+  in the container's cgroup. After ~150 searches the container reached systemd's
+  `DefaultTasksMax` (1027 on a host with `threads-max=6847`) and every new
+  search failed with `pthread_create: Resource temporarily unavailable`:
+  `POST /search` answered 500 while `/extract` kept working, because that
+  browser is long-lived. Docker's init reaps the orphans (measured: 0 zombies
+  after a run of searches, task count flat).
+
 - **A wedged scrapling session no longer hangs the extract endpoint.** The
   shared session's `fetch()` had no wall-clock cap: once the browser behind it
   stopped answering, the request never returned, the HTTP client gave up first
@@ -20,6 +32,17 @@ testing phase, and their history lives in the commit log.
   item.
 
 ### Added
+
+- **SearXNG-compatible read API (`GET /search` and `GET /`).** A thin adapter
+  over the same `run_search` answers SearXNG's request parameters and JSON
+  envelope, so a client that only speaks SearXNG as a search provider
+  (LibreChat, most self-hosted chat UIs) can point its instance URL at Forage:
+  same engines, same browser, same pacer, same cache entries as the native API.
+  `format=json` only (403 otherwise, like a SearXNG instance with the format
+  disabled), `general` category, page 1, `time_range`/`safesearch` accepted and
+  ignored; `engine`, `engines` and `score` are derived from the search and
+  documented as approximations. Native `POST /search` is untouched. Contract,
+  approximations and the LibreChat recipe: `docs/SEARXNG-API.md`.
 
 - **The shared scrapling session is recycled on a budget**
   (`browser.session_max_renders`, default 200 renders, and
