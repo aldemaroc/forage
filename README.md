@@ -318,6 +318,27 @@ disabled), `categories` is `general` only, `pageno` is page 1 only, and
 keeps its own Hermes-shaped contract. Parameters, approximations and the
 LibreChat recipe: **[docs/SEARXNG-API.md](docs/SEARXNG-API.md)**.
 
+### MCP (third party): forage-mcp
+
+For harnesses that hard-code their search and extraction and only accept a new
+backend through MCP, [dark-penguin/forage-mcp](https://github.com/dark-penguin/forage-mcp)
+is a community MCP server that exposes `POST /search` and `POST /extract` as the
+`forage_search` and `forage_extract` tools:
+
+```json
+{
+  "mcpServers": {
+    "forage": {
+      "command": "/path/to/forage-mcp",
+      "env": { "FORAGE_URL": "http://localhost:3672" }
+    }
+  }
+}
+```
+
+`FORAGE_API_KEY` takes the same Bearer token as the native API. It is a small
+third-party project, maintained outside this repository.
+
 ## Configuration
 
 All behavior is driven by `config.yaml` (bind-mounted read-only into the container) and env vars for secrets. Every option is documented in **[docs/CONFIG.md](docs/CONFIG.md)**. Here is the shape:
