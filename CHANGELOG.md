@@ -5,6 +5,23 @@ Notable changes per release. The format follows
 [semantic versioning](https://semver.org/): releases before 1.0.0 were the
 testing phase, and their history lives in the commit log.
 
+## [Unreleased]
+
+### Fixed
+
+- **The search browser is closed even when the request is cancelled or the
+  launch fails.** `SearchBrowser.stop()` wrapped each close in
+  `except Exception`, so a `CancelledError` (a `BaseException`) escaped before
+  `playwright.stop()` and the node driver plus Chromium stayed alive for the
+  life of the container. `__aenter__` had the mirror problem: a launch that
+  dies at `new_page()` raises before `__aexit__` ever runs, so a failed launch
+  (a crashed Chromium, a dead CDP endpoint) leaked a driver tree as well.
+  Cleanup now runs in a shielded task with per-step timeouts, closes the
+  browser explicitly in local mode, and runs when `start()` fails. Measured in
+  a disposable container: 3 failed searches used to leak 3 driver trees (about
+  90 container tasks each); 50 failed and 50 successful searches now end at
+  the baseline process count.
+
 ## [1.1.0] - 2026-11-09
 
 A SearXNG-compatible read API, plus the container fix that keeps the search

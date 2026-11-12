@@ -822,6 +822,32 @@ class SerpPacer:
 SERP_PACER = SerpPacer()
 
 
+# How long a single close step (page, context, browser, driver) may take.
+CLOSE_STEP_TIMEOUT = 15.0
+
+
+async def _quiet_close(awaitable: Any) -> None:
+    """Await one close step. Never raises, never hangs, never skips on cancel.
+
+    ``except Exception`` is not enough here: ``CancelledError`` is a
+    ``BaseException``, so a cancelled request would blow straight out of the
+    cleanup and leave the browser running.
+    """
+    try:
+        await asyncio.wait_for(awaitable, CLOSE_STEP_TIMEOUT)
+    except BaseException:  # noqa: BLE001
+        pass
+
+
+async def _finish_in_background(task: "asyncio.Future[None]") -> None:
+    """Wait for a cleanup task, letting it run on if the caller is cancelled."""
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        raise
+
+
 class SearchBrowser:
     """One-shot browser for SERP rendering.
 
@@ -928,27 +954,52 @@ class SearchBrowser:
             await self._page.add_init_script(STEALTH_INIT_SCRIPT)
 
     async def stop(self) -> None:
-        for closer in (self._page, self._context if self._owns_context else None):
-            if closer is None:
-                continue
-            try:
-                await closer.close()
-            except Exception:  # noqa: BLE001
-                pass
+        """Close the browser, surviving cancellation.
+
+        Cleanup runs in its own shielded task so a request that gets cancelled
+        (client gone, upstream timeout) can die while the browser still goes
+        away. The browser itself is closed explicitly in local mode: relying on
+        ``playwright.stop()`` alone leaves the node driver plus chromium alive
+        whenever that call is skipped or fails, and every leaked tree costs
+        ~90 container tasks until the container cannot fork anymore.
+        """
+        page, context, browser, pw = self._page, self._context, self._browser, self._pw
+        owns_context, mode = self._owns_context, self.mode
         self._page = None
         self._context = None
-        # A CDP browser belongs to whoever is running it: disconnect only.
-        if self._pw is not None:
-            try:
-                await self._pw.stop()
-            except Exception:  # noqa: BLE001
-                pass
-        self._pw = None
         self._browser = None
+        self._pw = None
+        self._owns_context = False
         self.started = False
 
+        async def _drain() -> None:
+            if page is not None:
+                await _quiet_close(page.close())
+            if owns_context and context is not None:
+                await _quiet_close(context.close())
+            # A CDP browser belongs to whoever is running it: disconnect only.
+            if mode == "local" and browser is not None:
+                await _quiet_close(browser.close())
+            if pw is not None:
+                await _quiet_close(pw.stop())
+
+        await _finish_in_background(asyncio.ensure_future(_drain()))
+
     async def __aenter__(self) -> "SearchBrowser":
-        await self.start()
+        try:
+            await self.start()
+        except BaseException:
+            # _launch() starts the driver before the browser is usable, and
+            # ``async with`` never calls __aexit__ when __aenter__ raises: a
+            # launch that dies at new_page() (chromium crash, dead CDP
+            # endpoint) would otherwise leak the driver and the crashed
+            # chromium for the lifetime of the container.
+            cleanup = asyncio.ensure_future(self.stop())
+            try:
+                await asyncio.shield(cleanup)
+            except BaseException:  # noqa: BLE001
+                cleanup.add_done_callback(lambda t: t.cancelled() or t.exception())
+            raise
         return self
 
     async def __aexit__(self, *_exc: Any) -> None:
