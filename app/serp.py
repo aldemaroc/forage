@@ -38,11 +38,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 
+from . import metrics
 from .config import ForageConfig
 
 logger = logging.getLogger(__name__)
@@ -445,6 +447,8 @@ async def _fetch_engine(
     """
     spec = SERP_ENGINE_SPECS[engine]
     url = spec["build"](query, language, limit)
+    engine_started = time.monotonic()
+    http_seconds = 0.0
     failures: List[str] = []
     chain: List[Optional[str]] = [None] if getattr(browser, "mode", "local") == "cdp" else list(browser_chain)
     retries = max(0, int(config.browser.search.retries if retries is None else retries))
@@ -455,12 +459,14 @@ async def _fetch_engine(
             if attempt:
                 await asyncio.sleep(backoff)
             try:
+                render_started = time.monotonic()
                 html = await browser.render(
                     url,
                     timeout=config.search.serp_timeout,
                     engine=browser_engine,
                     wait_for=spec.get("wait_for"),
                 )
+                http_seconds += time.monotonic() - render_started
             except asyncio.TimeoutError:
                 failures.append(f"{browser_engine or browser.engine}: timeout")
                 continue
@@ -490,10 +496,24 @@ async def _fetch_engine(
                 failures.append(f"{browser_engine or browser.engine}: parse raised {exc}")
                 logger.warning("SERP %s parse raised on browser %s: %s", engine, browser_engine, exc)
                 continue
+            metrics.observe_engine(
+                engine,
+                results=len(results),
+                total=time.monotonic() - engine_started,
+                http=http_seconds,
+                ok=True,
+            )
             return {"status": status, "error_type": error_type, "error": detail, "results": results}
 
     # Every attempt failed.
     err = "; ".join(failures) if failures else "no browsers in chain"
+    metrics.observe_engine(
+        engine,
+        results=0,
+        total=time.monotonic() - engine_started,
+        http=http_seconds,
+        ok=False,
+    )
     return {"status": "error", "error_type": "challenge", "error": err, "results": []}
 
 

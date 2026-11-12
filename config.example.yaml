@@ -12,6 +12,8 @@ server:
   port: 3672               # default port (T9 of "FORA"); customize freely
   workers: 2               # uvicorn workers
   log_level: info          # debug | info | warning | error
+  reap_orphans: true       # kill processes left behind by a dead worker
+  reap_interval: 30        # seconds between orphan sweeps
 
 # --- Cache --------------------------------------------------
 # In-memory LRU only. Master switch: when enabled: false, ALL caching is off
@@ -258,8 +260,23 @@ browser:
   session_max_renders: 200 # recycle the shared scrapling session after N renders (it
                            # degrades silently with use); 0 = never
   session_max_age: 21600   # recycle it after N seconds of uptime (6h); 0 = never
+  close_pages_when_idle: true # close the pool's warm tabs as soon as no render is in
+                           # flight; a warm tab holds a Chromium renderer (~70 MB) and our
+                           # response cache already prevents the re-render
+  session_idle_timeout: 120 # close the whole browser session (Chromium + driver, ~450 MB)
+                           # after N idle seconds; the next render relaunches it (~1-2s).
+                           # The session is also created lazily, so idle Forage holds no
+                           # browser at all. 0 = never close
 
 # --- Auth (optional) ------------------------------------------
 # API keys come from env: FORAGE_API_KEYS (comma separated)
 auth:
   enabled: false           # when true, every request needs Authorization: Bearer <key>
+
+# --- Metrics (optional) ----------------------------------------
+# Prometheus exposition at GET /metrics (SearXNG's path, with the same six
+# engine series) and GET /admin/metrics (Firecrawl's admin path, same payload).
+metrics:
+  enabled: true            # false -> both paths answer 404 "open metrics is disabled"
+  open_metrics: ""         # SearXNG's general.open_metrics: a password here turns on
+                           # HTTP Basic auth (username ignored); empty = open endpoint

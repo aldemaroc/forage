@@ -15,6 +15,8 @@ Resolution order: `built-in defaults → config.yaml → environment variables`.
 | `host` | `0.0.0.0` | Bind address inside the container. Bridge networking requires `0.0.0.0` (docker-proxy routes to it); the real exposure is controlled by the compose `ports:` mapping. |
 | `port` | `3672` | HTTP port (T9 of "FORA"). The app reads the config before starting uvicorn, so this is honored without rebuilding. |
 | `workers` | `2` | uvicorn worker processes. |
+| `reap_orphans` | `true` | Kill processes orphaned by a dead worker (Playwright drivers and the Chromium trees they started). A live orphan holds task slots and memory and nothing can close it anymore. Chromium's crashpad handlers (orphans by design) and the shared Xvfb are never touched. |
+| `reap_interval` | `30` | Seconds between orphan sweeps. |
 | `log_level` | `info` | `debug` \| `info` \| `warning` \| `error` |
 
 ## `cache`
@@ -25,6 +27,7 @@ In-memory LRU only (lost on restart, by design). The master switch `enabled` tur
 |---|---|---|
 | `enabled` | `true` | Master switch. `false` disables all caching regardless of section toggles. |
 | `max_entries` | `500` | Global LRU cap across both caches. |
+| `sweep_interval` | `30` | Seconds between cache sweeps. Each sweep drops expired entries and calls `malloc_trim`, so page contents stop occupying memory the moment their TTL is over instead of waiting for the LRU to push them out. `0` disables the sweep. |
 | `search.enabled` | `true` | Cache search results. |
 | `search.ttl` | `300` | Search TTL in seconds (5 min). Keeps repeated queries from hammering SearXNG's engines (anti-bot protection). |
 | `extract.enabled` | `false` | Extract caching off by default: extraction is always fresh (Firecrawl behavior). A short TTL (e.g. `120`) gives fast repeat extraction with bounded staleness. |
@@ -117,6 +120,8 @@ otherwise                                                 → static result
 | `render_timeout_grace` | `20` | Hard wall-clock cap added on top of the per-URL timeout. scrapling's own `timeout` only bounds page navigation: a wedged session can return from `fetch()` never, which hangs the HTTP request and keeps its semaphore slot forever. With the cap the render fails fast (`RenderTimeout`) and the caller returns an error item. `0` disables the cap. |
 | `session_max_renders` | `200` | Recycle the shared scrapling session after this many renders. A long-lived session degrades silently with use (see `render_timeout_grace`), and recreation costs well under a second. `0` disables. |
 | `session_max_age` | `21600` | Recycle the shared scrapling session after this many seconds of uptime (6h by default). `0` disables. |
+| `close_pages_when_idle` | `true` | Close the page pool's warm tabs as soon as no render is in flight. A warm tab keeps a Chromium renderer plus the decoded DOM alive (~70 MB per heavy page, `max_instances` tabs per worker), and the response cache already prevents the re-render, so the tab buys a fraction of a second and costs hundreds of megabytes. `false` keeps them for reuse. |
+| `session_idle_timeout` | `120` | Close the whole browser session (Chromium tree + Playwright driver, ~450 MB) after this many idle seconds; the next render relaunches it in 1-2s. The session is created lazily, so a Forage that has not rendered yet holds no browser at all. `0` never closes it. |
 
 ### `browser.search` (provider=forage)
 
@@ -159,6 +164,21 @@ never touched by `/extract`:
 | `enabled` | `false` | Require `Authorization: Bearer <key>` on `/search`, `/extract` and `/admin/*`. `/health` stays open (healthcheck). |
 
 Keys come from the `FORAGE_API_KEYS` env var (comma-separated) and are compared in constant time.
+
+## `metrics`
+
+Prometheus exposition at `GET /metrics` (SearXNG's path, same six engine series
+plus Forage's own) and `GET /admin/metrics` (Firecrawl's admin path, same
+payload). See [METRICS.md](METRICS.md) for every series and the scrape config.
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Serve the exposition. `false` answers `404 open metrics is disabled` on both paths. |
+| `open_metrics` | `""` | SearXNG's setting, same semantics: when non-empty, a scrape needs HTTP Basic auth whose password is this value (the username is ignored). Empty means the endpoint is open. |
+
+Metrics run in prometheus_client's multiprocess mode (`PROMETHEUS_MULTIPROC_DIR`,
+set to `/tmp/forage-prometheus`), so counters merge across `server.workers`
+instead of each worker reporting only its own.
 
 ## Environment variables
 

@@ -8,6 +8,13 @@ LABEL org.opencontainers.image.title="Forage" \
 
 WORKDIR /srv/forage
 
+# libatomic1 is needed by the Playwright driver's own node binary before any
+# browser is downloaded: python:3.12-slim ships without it, and `--with-deps`
+# only installs the browser's libraries, so the driver fails to load.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependencies first (layer caching). Playwright downloads Chromium + system deps.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \

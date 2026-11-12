@@ -187,6 +187,14 @@ smoke test on a machine you do not want to set up; for real use, do steps 1 and
 
 Liveness probe. Always open (used by the container healthcheck).
 
+### `GET /metrics`
+
+Prometheus/OpenMetrics exposition: traffic, searches, extractions, browser
+sessions, cache, reaper and container memory. It also carries SearXNG's six
+`searxng_engines_*` series, so a SearXNG dashboard works against it, and the
+same payload is served at `/admin/metrics` (Firecrawl's admin path). Optional
+HTTP Basic password via `metrics.open_metrics`. See **[docs/METRICS.md](docs/METRICS.md)**.
+
 ### `POST /search`
 
 ```json

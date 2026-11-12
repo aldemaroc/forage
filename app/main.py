@@ -6,17 +6,43 @@ Phase 3: /search (SearXNG) + /extract (hybrid static -> browser).
 from __future__ import annotations
 
 import asyncio
+import base64
+import hmac
 import logging
+import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
+# prometheus_client decides between single-process and multiprocess mode when it
+# is imported, so the directory has to be decided before `.metrics` is imported.
+# uvicorn workers inherit this variable, and each one writes its own file there:
+# a scrape then reports the whole container instead of the worker that answered.
+os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", "/tmp/forage-prometheus")
+
+if __name__ == "__main__":
+    # Only the supervisor gets here (`python -m app.main`); uvicorn's workers
+    # import this module as `app.main`, so they skip the wipe and keep each
+    # other's files. The wipe has to happen *before* the metrics module is
+    # imported: a metric's file is created when the metric object is built, so
+    # deleting the directory afterwards would leave the supervisor writing to an
+    # unlinked inode and its counters would never be scraped. Files from a
+    # previous run would otherwise keep reporting processes that are gone.
+    import pathlib as _pathlib
+    import shutil as _shutil
+
+    _mp_dir = os.environ["PROMETHEUS_MULTIPROC_DIR"]
+    _shutil.rmtree(_mp_dir, ignore_errors=True)
+    _pathlib.Path(_mp_dir).mkdir(parents=True, exist_ok=True)
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from . import __version__
+from . import metrics
 from .auth import extract_bearer, key_is_valid, load_api_keys
 from .browser import BrowserPool, SearchBrowser
 from .cache import TTLCache
@@ -24,6 +50,7 @@ from .config import load_config
 from .display import ensure_display, stop_display
 from .extract import extract_url
 from .firecrawl import API_PREFIXES, build_firecrawl_routers
+from .reaper import orphan_reaper, start_reaper_thread
 from .searxng import search_searxng
 from .searxng_compat import build_searxng_router
 from .serp import search_forage
@@ -95,6 +122,37 @@ def require_auth(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+async def _idle_maintenance(interval: float) -> None:
+    """Drop expired cache entries and hand the freed memory back to the OS.
+
+    Two things keep Forage fat while idle: expired cache entries, which stay in
+    the dict until someone asks for the key, and glibc, which keeps freed
+    blocks in its arenas so RSS never comes down even after the data is gone.
+    A sweep plus ``malloc_trim`` returns the process to its working set.
+    """
+    while True:
+        try:
+            dropped = search_cache.purge_expired() + extract_cache.purge_expired()
+            metrics.set_cache_entries("search", len(search_cache))
+            metrics.set_cache_entries("extract", len(extract_cache))
+            if dropped:
+                logger.debug("Cache sweep dropped %d expired entrie(s)", dropped)
+            _release_free_memory()
+        except Exception:  # noqa: BLE001 (maintenance must never kill the app)
+            logger.exception("Idle maintenance failed")
+        await asyncio.sleep(max(interval, 5.0))
+
+
+def _release_free_memory() -> None:
+    """Return glibc's free arenas to the kernel (Linux only, best effort)."""
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # noqa: BLE001 (musl, macOS, Windows: nothing to do)
+        pass
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # A headful browser needs an X display. Start one (Xvfb) before the pools,
@@ -110,7 +168,36 @@ async def lifespan(_app: FastAPI):
     display = ensure_display() if needs_display else None
     for pool in browser_pools.values():
         await pool.start()
+    metrics.set_info(__version__, config.browser.engine, config.search.provider)
+    metrics.set_cache_entries("search", len(search_cache))
+    metrics.set_cache_entries("extract", len(extract_cache))
+    # Sweep orphans before anything else so a worker that restarted after an
+    # OOM kill starts from a clean process table, then keep sweeping: a worker
+    # that dies later leaves its browsers re-parented to PID 1 with nobody to
+    # close them.
+    reaper_task = None
+    if config.server.reap_orphans:
+        reaper_task = asyncio.create_task(
+            orphan_reaper(float(config.server.reap_interval))
+        )
+    maintenance_task = None
+    if config.cache.sweep_interval > 0:
+        maintenance_task = asyncio.create_task(
+            _idle_maintenance(float(config.cache.sweep_interval))
+        )
     yield
+    if maintenance_task is not None:
+        maintenance_task.cancel()
+        try:
+            await maintenance_task
+        except BaseException:  # noqa: BLE001 (shutdown must not raise)
+            pass
+    if reaper_task is not None:
+        reaper_task.cancel()
+        try:
+            await reaper_task
+        except BaseException:  # noqa: BLE001 (shutdown must not raise)
+            pass
     for pool in browser_pools.values():
         await pool.stop()
     stop_display(display)
@@ -130,6 +217,25 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def _traffic_metrics(request: Request, call_next):
+    """Count every request against its route template, never its raw path.
+
+    Using the template (``/v1/scrape``) instead of the URL keeps the ``route``
+    label bounded: a public service would otherwise mint a series per URL.
+    """
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        metrics.observe_http(request.method, route, 500, time.perf_counter() - started)
+        raise
+    route = getattr(request.scope.get("route"), "path", "unmatched")
+    metrics.observe_http(request.method, route, response.status_code, time.perf_counter() - started)
+    return response
+
+
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
     limit: int = Field(default=5, ge=1, le=50)
@@ -145,6 +251,18 @@ class ExtractRequest(BaseModel):
     wait_for: Optional[str] = Field(default=None, max_length=200)
     timeout: Optional[int] = Field(default=None, ge=1, le=120)
     engine: Optional[str] = Field(default=None, pattern="^(trafilatura|readability)$")
+
+
+#: Every ``method`` value ``extract.py``/``documents.py`` can report, plus
+#: ``other`` for anything unforeseen. The label is whitelisted because a label
+#: value invented at runtime would add a series nobody asked for.
+_EXTRACT_METHODS = frozenset(
+    {"static", "browser", "browser+solver", "browser+readability", "pdf", "docx", "xlsx", "pptx", "rtf"}
+)
+
+
+def _extract_method_label(method: Optional[str]) -> str:
+    return method if method in _EXTRACT_METHODS else "other"
 
 
 def _search_cache_key(
@@ -174,10 +292,21 @@ async def run_search(
     """
     cache_enabled = config.cache.enabled and config.cache.search.enabled and not bypass_cache
     key = _search_cache_key(query, limit, language, engines)
+    started = time.perf_counter()
+    provider = config.search.provider
     if cache_enabled:
         cached = search_cache.get(key)
         if cached is not None:
+            metrics.observe_cache("search", "hit")
+            metrics.observe_search(
+                provider,
+                "hit",
+                "ok" if cached.get("success") else "error",
+                time.perf_counter() - started,
+                len(cached.get("data") or []),
+            )
             return cached, "hit"
+        metrics.observe_cache("search", "miss")
 
     if config.search.provider == "forage":
         # One browser per search, opened here and closed at the end of the
@@ -203,8 +332,18 @@ async def run_search(
 
     if cache_enabled and result.get("success"):
         search_cache.set(key, result, ttl=config.cache.search.ttl)
+        metrics.set_cache_entries(
+            "search", len(search_cache)
+        )
 
     header = "miss" if cache_enabled else ("bypass" if bypass_cache else "disabled")
+    metrics.observe_search(
+        provider,
+        header,
+        "ok" if result.get("success") else "error",
+        time.perf_counter() - started,
+        len(result.get("data") or []),
+    )
     return result, header
 
 
@@ -228,14 +367,25 @@ async def run_extract(
     """
     cache_enabled = config.cache.enabled and config.cache.extract.enabled and not bypass_cache
     key = _extract_cache_key(urls, force_render, wait_for, fmt, engine)
+    started = time.perf_counter()
     if cache_enabled:
         cached = extract_cache.get(key)
         if cached is not None:
+            metrics.observe_cache("extract", "hit")
+            for item in cached:
+                metrics.observe_extract(
+                    _extract_method_label(item.get("method")),
+                    "cached",
+                    0.0,
+                    len(item.get("markdown") or item.get("content") or ""),
+                )
             return cached, "hit"
+        metrics.observe_cache("extract", "miss")
 
     async def _extract_one(url: str) -> Dict[str, Any]:
+        url_started = time.perf_counter()
         try:
-            return await extract_url(
+            result = await extract_url(
                 config,
                 browser_pools[config.browser.engine],
                 url,
@@ -248,7 +398,16 @@ async def run_extract(
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Extract failed for %s", url)
+            metrics.observe_extract("other", "error", time.perf_counter() - url_started, 0)
             return {"url": url, "error": str(exc)}
+        payload = result.get("markdown") or result.get("content") or ""
+        metrics.observe_extract(
+            _extract_method_label(result.get("method")),
+            "error" if "error" in result else "ok",
+            time.perf_counter() - url_started,
+            len(payload),
+        )
+        return result
 
     # Parallel extraction: static fetches run concurrently; browser renders are
     # bounded by the pool semaphore (browser.max_instances). gather preserves
@@ -257,6 +416,7 @@ async def run_extract(
 
     if cache_enabled and all("error" not in r for r in results):
         extract_cache.set(key, results, ttl=config.cache.extract.ttl)
+        metrics.set_cache_entries("extract", len(extract_cache))
 
     header = "miss" if cache_enabled else ("bypass" if bypass_cache else "disabled")
     return list(results), header
@@ -342,6 +502,59 @@ async def extract(
     )
 
 
+def _metrics_denied(request: Request):
+    """SearXNG's ``general.open_metrics`` check, for compatibility.
+
+    When a password is configured the scrape must send HTTP Basic auth whose
+    password matches it; the username is ignored, exactly like SearXNG. Empty
+    password means the endpoint is open.
+    """
+    password = config.metrics.open_metrics
+    if not password:
+        return None
+    header = request.headers.get("authorization", "")
+    given = ""
+    if header[:6].lower() == "basic ":
+        try:
+            decoded = base64.b64decode(header[6:].strip()).decode("utf-8", "replace")
+            given = decoded.partition(":")[2]
+        except Exception:  # noqa: BLE001 (malformed header is just a denial)
+            given = ""
+    if given and hmac.compare_digest(given, password):
+        return None
+    return PlainTextResponse(
+        "access forbidden\n",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="metrics"'},
+    )
+
+
+def _metrics_response(request: Request):
+    if not config.metrics.enabled:
+        # 404 (not 403) mirrors SearXNG: a scrape that gets this means the
+        # setting never took effect, not that the credential is wrong.
+        raise HTTPException(status_code=404, detail="open metrics is disabled")
+    denied = _metrics_denied(request)
+    if denied is not None:
+        return denied
+    return PlainTextResponse(metrics.render().decode("utf-8"), media_type="text/plain; version=0.0.4")
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request):
+    """Prometheus/OpenMetrics exposition (SearXNG-compatible series included)."""
+    return _metrics_response(request)
+
+
+@app.get("/admin/metrics", include_in_schema=False)
+async def prometheus_metrics_admin(
+    request: Request, _auth: None = Depends(require_auth)
+):
+    """Same exposition under Firecrawl's admin path, so a scrape config written
+    for Firecrawl (`GET /admin/metrics`, text/plain) keeps working."""
+    return _metrics_response(request)
+
+
 @app.post("/admin/cache/purge")
 async def purge_cache(_auth: None = Depends(require_auth)) -> dict:
     """Clear the in-memory caches (search + extract)."""
@@ -381,10 +594,29 @@ if __name__ == "__main__":
         config.server.port,
         config.source_path,
     )
-    uvicorn.run(
-        "app.main:app",
-        host=config.server.host,
-        port=config.server.port,
-        workers=config.server.workers,
-        log_level=config.server.log_level,
+    # The X display is started by this process, not by a worker: an Xvfb owned
+    # by a worker becomes an orphan the moment that worker dies (OOM kill,
+    # crash, restart) and the surviving worker still needs it. Owning it here
+    # also means it goes away with the container.
+    wants_headful = (
+        not config.browser.headless
+        or (
+            config.search.provider == "forage"
+            and config.browser.search.local
+            and not (config.browser.search.cdp_url or config.browser.cdp_url)
+            and not config.browser.search.headless
+        )
     )
+    display = ensure_display() if wants_headful else None
+    if config.server.reap_orphans:
+        start_reaper_thread(float(config.server.reap_interval))
+    try:
+        uvicorn.run(
+            "app.main:app",
+            host=config.server.host,
+            port=config.server.port,
+            workers=config.server.workers,
+            log_level=config.server.log_level,
+        )
+    finally:
+        stop_display(display)

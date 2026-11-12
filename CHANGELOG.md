@@ -7,6 +7,51 @@ testing phase, and their history lives in the commit log.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-12
+
+### Added
+
+- **Prometheus metrics (`GET /metrics`, issue #11).** Forage now exposes
+  counters, histograms and gauges for traffic, searches, extractions, browser
+  renders/launches, cache hit/miss, orphan-reaper kills and container/process
+  memory, on top of `forage_info` with the version and engine. The exposition
+  also carries SearXNG's six engine series (`searxng_engines_*` with
+  `engine_name`) so a dashboard or scrape config written for SearXNG works
+  unchanged when it is pointed at Forage, and the same payload is served at
+  `/admin/metrics`, the path Firecrawl uses. `metrics.open_metrics` reproduces
+  SearXNG's password gate (HTTP Basic, username ignored) and a disabled
+  endpoint answers `404 open metrics is disabled`. Labels come from closed sets
+  only (route templates, not URLs), and prometheus_client runs in multiprocess
+  mode so counters merge across `server.workers` instead of each worker
+  reporting only its own. See `docs/METRICS.md`.
+- **Idle release (`browser.close_pages_when_idle` and
+  `browser.session_idle_timeout`).** The scrapling page pool kept up to
+  `max_instances` tabs per worker warm between renders, and every warm tab
+  holds a Chromium renderer plus the decoded DOM (~70 MB per heavy page): ten
+  forced renders left the container 765 MB heavier and it never came back down.
+  The pool's tabs now close as soon as no render is in flight, and the whole
+  session (Chromium tree plus Playwright driver, ~450 MB) closes after
+  `session_idle_timeout` seconds of idleness and is relaunched on the next
+  render. The session is also created lazily now instead of at boot, so an idle
+  Forage keeps no browser at all: 153 MB and 9 processes, against 683 MB before
+  the first request.
+- **Cache sweep (`cache.sweep_interval`, 30s).** Expired entries used to sit in
+  the dict until someone asked for the key or the LRU pushed them out, keeping
+  page contents in memory long after they stopped being useful. A background
+  task drops them and calls `malloc_trim` so the freed arenas go back to the
+  kernel instead of staying in the process's RSS.
+- **Orphan sweep (`server.reap_orphans`, on by default).** A worker that dies
+  (OOM kill, crash, restart) leaves its Playwright driver and the Chromium
+  trees it started re-parented to the container's PID 1, and `docker-init` only
+  reaps *dead* children: the live orphan keeps its task slots and memory
+  forever with nobody left to close it. The supervisor process now scans for
+  processes whose parent is PID 1 (excluding itself, Chromium's crashpad
+  handlers, which double-fork on purpose, and the shared Xvfb) and kills their
+  whole subtree with `SIGKILL`, every `server.reap_interval` seconds and once
+  at startup. A browser that belongs to a live worker is always a descendant of
+  that worker, never a child of PID 1, so the sweep cannot touch a healthy
+  search.
+
 ### Fixed
 
 - **The search browser is closed even when the request is cancelled or the
@@ -21,6 +66,12 @@ testing phase, and their history lives in the commit log.
   a disposable container: 3 failed searches used to leak 3 driver trees (about
   90 container tasks each); 50 failed and 50 successful searches now end at
   the baseline process count.
+
+- **The Xvfb display belongs to the supervisor, not to a worker.** When the
+  worker that started it died, the display survived as an orphan that the
+  remaining worker was still using: killing it takes headful search down, and
+  leaving it alive defeats the point of an orphan sweep. It is now started
+  before uvicorn spawns the workers, so it goes away with the container.
 
 ## [1.1.0] - 2026-11-09
 

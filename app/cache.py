@@ -46,6 +46,21 @@ class TTLCache:
             self._data.clear()
             return n
 
+    def purge_expired(self) -> int:
+        """Drop entries whose TTL is over. Returns how many went away.
+
+        Expired entries otherwise sit in the dict until someone asks for the
+        key or the LRU pushes them out, which keeps their payload (page
+        contents, markdown) in memory long after it stopped being useful.
+        """
+        now = time.monotonic()
+        removed = 0
+        with self._lock:
+            for key in [k for k, (exp, _) in self._data.items() if exp < now]:
+                del self._data[key]
+                removed += 1
+        return removed
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._data)

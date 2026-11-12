@@ -15,6 +15,8 @@ import os
 import pathlib
 import random as _random
 import time
+
+from . import metrics
 from collections import deque
 from typing import Any, Deque, Dict, Optional, Union
 
@@ -138,6 +140,10 @@ class BrowserPool:
         self.render_timeout_grace = getattr(browser_config, "render_timeout_grace", 20)
         self.session_max_renders = getattr(browser_config, "session_max_renders", 200)
         self.session_max_age = getattr(browser_config, "session_max_age", 21600)
+        self.close_pages_when_idle = getattr(browser_config, "close_pages_when_idle", True)
+        self.session_idle_timeout = getattr(browser_config, "session_idle_timeout", 120)
+        self._idle_close_at = 0.0
+        self._idle_watch_task: Optional[asyncio.Task] = None
         self._scrapling_renders = 0
         self._scrapling_started = time.monotonic()
         self._inflight = 0  # renders currently using the shared session
@@ -159,23 +165,11 @@ class BrowserPool:
             logger.warning("Browser disabled (max_instances=0)")
             return
         if self.engine == "scrapling":
-            from scrapling.fetchers import AsyncStealthySession
-
-            # network_idle is handled inside page_action (capped), so the
-            # session itself does not wait for it (streaming pages would
-            # otherwise hit the full fetch timeout). solve_cloudflare is
-            # configurable: the built-in solver costs ~5s per page (it waits
-            # for networkidle before detecting), while our page_action polls
-            # the title and resolves non-interactive challenges for free.
-            self._scrapling_session = AsyncStealthySession(
-                headless=self.headless,
-                network_idle=False,
-                timeout=self.launch_timeout * 1000,
-                max_pages=max(1, self.max_instances),
-                solve_cloudflare=self.solve_cloudflare,
-                useragent=self.user_agent,
-            )
-            await self._scrapling_session.start()
+            # Lazy on purpose: a browser that is up at boot costs ~450 MB of
+            # Chromium + driver with nothing to render, and every uvicorn worker
+            # pays it. The session is created on the first render and dropped
+            # again by the idle watchdog.
+            self._scrapling_session = None
             self._scrapling_started = time.monotonic()
             self._scrapling_renders = 0
             self._semaphore = asyncio.Semaphore(self.max_instances)
@@ -249,6 +243,8 @@ class BrowserPool:
         if self._pw is not None:
             await self._pw.stop()
         self._started = False
+        metrics.set_session_open("scrapling", False)
+        metrics.observe_session_close("scrapling", "shutdown")
 
     async def _launch_new(self) -> Optional[Any]:
         try:
@@ -302,6 +298,34 @@ class BrowserPool:
         challenge_timeout: Optional[int] = None,
         readability: bool = False,
     ) -> Union[str, Dict[str, str]]:
+        """Render a URL, recording the outcome for ``/metrics``."""
+        started = time.monotonic()
+        try:
+            html = await self._render(
+                url,
+                wait_for,
+                timeout,
+                scroll_steps,
+                network_idle_timeout,
+                challenge_timeout,
+                readability,
+            )
+        except BaseException:
+            metrics.observe_render(self.engine, "error", time.monotonic() - started)
+            raise
+        metrics.observe_render(self.engine, "ok", time.monotonic() - started)
+        return html
+
+    async def _render(
+        self,
+        url: str,
+        wait_for: Optional[str] = None,
+        timeout: int = 30,
+        scroll_steps: Optional[int] = None,
+        network_idle_timeout: Optional[int] = None,
+        challenge_timeout: Optional[int] = None,
+        readability: bool = False,
+    ) -> Union[str, Dict[str, str]]:
         """Render a URL with the configured engine and return the final DOM HTML.
 
         Per-call overrides (used by domain_overrides): ``scroll_steps``,
@@ -322,6 +346,7 @@ class BrowserPool:
             return await self._cdp_render(url, wait_for, timeout, steps, idle_cap, readability)
         browser = await self.acquire()
         page = None
+        context = None
         try:
             context = await browser.new_context(user_agent=self.user_agent)
             page = await context.new_page()
@@ -351,11 +376,13 @@ class BrowserPool:
             html = await page.content()
             return html
         finally:
+            # Close the page AND the context. Closing only the page leaves the
+            # context (its storage partition and network context) behind, one
+            # per render, for as long as the pool browser lives.
             if page is not None:
-                try:
-                    await page.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                await _quiet_close(page.close())
+            if context is not None:
+                await _quiet_close(context.close())
             self.release(browser)
 
     async def _cdp_render(
@@ -465,6 +492,7 @@ class BrowserPool:
                 self._scrapling_session = None
             from scrapling.fetchers import AsyncStealthySession
 
+            launch_started = time.monotonic()
             self._scrapling_session = AsyncStealthySession(
                 headless=self.headless,
                 network_idle=False,
@@ -473,7 +501,13 @@ class BrowserPool:
                 solve_cloudflare=self.solve_cloudflare,
                 useragent=self.user_agent,
             )
-            await self._scrapling_session.start()
+            try:
+                await self._scrapling_session.start()
+            except BaseException:
+                metrics.observe_launch("scrapling", "error", time.monotonic() - launch_started)
+                raise
+            metrics.observe_launch("scrapling", "ok", time.monotonic() - launch_started)
+            metrics.set_session_open("scrapling", True)
             self._scrapling_started = time.monotonic()
             self._scrapling_renders = 0
             logger.warning("Scrapling session recreated (%s)", reason)
@@ -497,6 +531,7 @@ class BrowserPool:
             )
             return
         await self._restart_scrapling_session(reason)
+        metrics.observe_session_close("scrapling", "budget")
 
     async def _reset_solver_session(self, reason: str) -> None:
         """Drop the lazy solver session so the next retry builds a fresh one."""
@@ -587,7 +622,7 @@ class BrowserPool:
         behaviour matches the Playwright path: domcontentloaded -> capped
         networkidle wait (best-effort) -> optional scroll -> page content.
         """
-        if not self._started or self._scrapling_session is None or self._semaphore is None:
+        if not self._started or self._semaphore is None:
             raise RuntimeError("Scrapling session not started or disabled")
         idle_cap = self.network_idle_timeout if network_idle_timeout is None else network_idle_timeout
         chal_cap = self.challenge_timeout if challenge_timeout is None else challenge_timeout
@@ -641,7 +676,9 @@ class BrowserPool:
                     f"{int(time.monotonic() - self._scrapling_started)}s)"
                 )
             if self._scrapling_session is None:
-                raise RuntimeError("Scrapling session not started or disabled")
+                # Only reachable when the idle watchdog closed the session, so
+                # rebuild it instead of failing the first request after a nap.
+                await self._restart_scrapling_session("reopen after idle")
             resp = await self._scrapling_call(
                 self._scrapling_session,
                 url,
@@ -657,7 +694,82 @@ class BrowserPool:
             return resp.body.decode("utf-8", errors="ignore")
         finally:
             self._inflight -= 1
+            # Still holding the semaphore: no other render can start, so closing
+            # the warm tabs here cannot pull a page out from under anyone.
+            if self._inflight == 0 and self.close_pages_when_idle:
+                await self._close_idle_pages()
+                self._schedule_idle_close()
             self._semaphore.release()
+
+    def _schedule_idle_close(self) -> None:
+        """Arm the idle timer that closes the session when nothing else runs."""
+        if self.session_idle_timeout <= 0:
+            return
+        self._idle_close_at = time.monotonic() + self.session_idle_timeout
+        if self._idle_watch_task is None or self._idle_watch_task.done():
+            self._idle_watch_task = asyncio.create_task(self._idle_watch())
+
+    async def _idle_watch(self) -> None:
+        """Close the scrapling session once it has been idle long enough.
+
+        A live session means a Chromium tree plus a Playwright driver holding
+        hundreds of megabytes with nothing to do. Closing it costs one browser
+        launch (~1-2s) on the next render, which is cheap next to rendering the
+        page itself, and the response cache absorbs most repeats anyway.
+        """
+        while True:
+            delay = self._idle_close_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay + 0.05)
+                continue
+            if self._semaphore is None:
+                return
+            try:
+                # Holding the semaphore guarantees no render starts under us.
+                await asyncio.wait_for(self._semaphore.acquire(), 1)
+            except (asyncio.TimeoutError, TimeoutError):
+                return  # renders are queued; their idle tail reschedules us
+            try:
+                if self._inflight or self._idle_close_at > time.monotonic():
+                    continue
+                await self._close_idle_session()
+                return
+            finally:
+                self._semaphore.release()
+
+    async def _close_idle_session(self) -> None:
+        """Drop the shared session (and its browser tree) while idle."""
+        session, self._scrapling_session = self._scrapling_session, None
+        self._recycle_pending = False
+        self._scrapling_renders = 0
+        if session is not None:
+            try:
+                await asyncio.wait_for(session.close(), 20)
+            except BaseException:  # noqa: BLE001 (cleanup never raises)
+                logger.exception("Closing the idle scrapling session failed")
+            logger.info(
+                "Scrapling session closed (idle for %ss)", self.session_idle_timeout
+            )
+        metrics.set_session_open("scrapling", False)
+        metrics.observe_session_close("scrapling", "idle")
+        await self._reset_solver_session("idle")
+
+    async def _close_idle_pages(self) -> None:
+        """Close the tabs the scrapling page pool keeps warm between renders.
+
+        The pool holds up to ``max_pages`` tabs per session so the next render
+        can reuse one, and every warm tab keeps a Chromium renderer plus the
+        decoded DOM alive: ~70 MB per heavy page, times one session per worker.
+        Our response cache already prevents the re-render, so keeping the DOM
+        warm buys a fraction of a second and costs hundreds of megabytes.
+        """
+        for session in (self._scrapling_session, self._solver_session):
+            if session is None:
+                continue
+            try:
+                await asyncio.wait_for(session.close_pages(), 10)
+            except BaseException:  # noqa: BLE001 (cleanup never raises)
+                pass
 
     async def _get_solver_session(self) -> Any:
         """Lazily create the scrapling session with the built-in Cloudflare
@@ -905,7 +1017,14 @@ class SearchBrowser:
                 "falling back to headless (expect anti-bot pages)"
             )
             self.headless = True
-        await self._launch()
+        launch_started = time.monotonic()
+        try:
+            await self._launch()
+        except BaseException:
+            metrics.observe_launch("search", "error", time.monotonic() - launch_started)
+            raise
+        metrics.observe_launch("search", "ok", time.monotonic() - launch_started)
+        metrics.set_session_open("search", True)
         self.started = True
         logger.info(
             "Search browser ready (mode=%s engine=%s headless=%s)",
@@ -971,6 +1090,7 @@ class SearchBrowser:
         self._pw = None
         self._owns_context = False
         self.started = False
+        metrics.set_session_open("search", False)
 
         async def _drain() -> None:
             if page is not None:
@@ -1004,6 +1124,7 @@ class SearchBrowser:
 
     async def __aexit__(self, *_exc: Any) -> None:
         await self.stop()
+
 
     # -- rendering ---------------------------------------------------------
 

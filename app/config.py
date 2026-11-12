@@ -118,6 +118,22 @@ class ServerConfig:
     port: int = 3672
     workers: int = 2
     log_level: str = "info"
+    # Kill processes orphaned by a dead worker (Playwright drivers and the
+    # Chromium trees they started) instead of letting them hold task slots and
+    # memory for the lifetime of the container.
+    reap_orphans: bool = True
+    reap_interval: int = 30
+
+
+@dataclass(frozen=True)
+class MetricsConfig:
+    """Prometheus exposition at GET /metrics (and GET /admin/metrics)."""
+
+    enabled: bool = True
+    # Same idea as SearXNG's general.open_metrics: when set, the scrape needs
+    # HTTP Basic auth whose password is this value (the username is ignored).
+    # Empty means the endpoint is open, which is fine behind a private network.
+    open_metrics: str = ""
 
 
 @dataclass(frozen=True)
@@ -130,6 +146,7 @@ class CacheOpConfig:
 class CacheConfig:
     enabled: bool = True
     max_entries: int = 500
+    sweep_interval: int = 30  # drop expired entries (and hand memory back to the OS) every N seconds
     search: CacheOpConfig = field(default_factory=lambda: CacheOpConfig(True, 300))
     extract: CacheOpConfig = field(default_factory=lambda: CacheOpConfig(False, 3600))
 
@@ -230,6 +247,8 @@ class BrowserConfig:
     render_timeout_grace: int = 20  # hard wall-clock cap on top of the per-URL timeout (a wedged browser must fail, not hang)
     session_max_renders: int = 200  # recycle the shared scrapling session after N renders
     session_max_age: int = 21600  # recycle the shared scrapling session after N seconds (6h)
+    close_pages_when_idle: bool = True  # close the session's warm tabs when no render is in flight
+    session_idle_timeout: int = 120  # close the whole browser session after N idle seconds (0 = never)
 
 
 @dataclass(frozen=True)
@@ -246,6 +265,7 @@ class ForageConfig:
     browser: BrowserConfig
     auth: AuthConfig
     source_path: str
+    metrics: MetricsConfig = field(default_factory=MetricsConfig)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], source_path: str) -> "ForageConfig":
@@ -255,11 +275,13 @@ class ForageConfig:
         extract = data.get("extract", {})
         browser = data.get("browser", {})
         auth = data.get("auth", {})
+        metrics = data.get("metrics", {})
         return cls(
             server=ServerConfig(**server),
             cache=CacheConfig(
                 enabled=cache.get("enabled", True),
                 max_entries=cache.get("max_entries", 500),
+                sweep_interval=cache.get("sweep_interval", 30),
                 search=CacheOpConfig(**cache.get("search", {})),
                 extract=CacheOpConfig(**cache.get("extract", {})),
             ),
@@ -288,6 +310,7 @@ class ForageConfig:
             ),
             auth=AuthConfig(**auth),
             source_path=source_path,
+            metrics=MetricsConfig(**metrics),
         )
 
     def validate(self) -> None:
