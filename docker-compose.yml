@@ -1,11 +1,14 @@
 services:
   forage:
     build: .
-    # Published image: docker pull ghcr.io/aldemaroc/forage:1.2.0
+    # Published image: docker pull ghcr.io/aldemaroc/forage:latest
     # `build: .` above keeps local builds working; compose tags the local build
     # with this name. To run the published image without building, comment out
     # the build line and use `docker compose pull && docker compose up -d`.
-    image: ghcr.io/aldemaroc/forage:1.2.0
+    # `latest` follows the newest release: `docker compose pull` upgrades. Pin
+    # the exact version (`:1.2.0`) instead when you want updates to be a
+    # deliberate step.
+    image: ghcr.io/aldemaroc/forage:latest
     container_name: forage
     restart: always
     # PID 1 = docker-init (tini), not the python app: every /search launches a
