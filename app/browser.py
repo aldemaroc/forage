@@ -16,7 +16,7 @@ import pathlib
 import random as _random
 import time
 
-from . import metrics
+from . import metrics, proctree
 from collections import deque
 from typing import Any, Deque, Dict, Optional, Union
 
@@ -158,6 +158,12 @@ class BrowserPool:
         self._session_lock = asyncio.Lock()  # guards scrapling session recreation when it dies
         self._cleanup_task: Optional[asyncio.Task] = None
         self._started = False
+        # Driver sessions spawned by this pool: one per Playwright instance, which
+        # covers every browser that instance launched. Killed on stop(), never on
+        # a per-browser close (the others still need the session).
+        self._driver_sessions: list[int] = []
+        self._scrapling_sessions: list[int] = []
+        self._solver_sessions: list[int] = []
 
     async def start(self) -> None:
         """Launch the engine and warm the pool."""
@@ -184,7 +190,14 @@ class BrowserPool:
 
             if not self.cdp_url:
                 raise RuntimeError("browser.cdp_url is required for this engine")
-            self._pw = await async_playwright().start()
+            sessions: list[int] = []
+            try:
+                async with proctree.capture() as sessions:
+                    self._pw = await async_playwright().start()
+            except BaseException:
+                proctree.kill_trees(sessions, reason="failed start")
+                raise
+            self._driver_sessions.extend(sessions)
             self._cdp_browser = await self._pw.chromium.connect_over_cdp(
                 endpoint_url=self.cdp_url,
                 timeout=self.launch_timeout * 1000,
@@ -198,7 +211,14 @@ class BrowserPool:
         else:
             from playwright.async_api import async_playwright
 
-        self._pw = await async_playwright().start()
+        sessions: list[int] = []
+        try:
+            async with proctree.capture() as sessions:
+                self._pw = await async_playwright().start()
+        except BaseException:
+            proctree.kill_trees(sessions, reason="failed start")
+            raise
+        self._driver_sessions.extend(sessions)
         self._semaphore = asyncio.Semaphore(self.max_instances)
         # Warm the pool to min_idle (release after launch so they sit idle).
         for _ in range(self.min_idle):
@@ -210,6 +230,12 @@ class BrowserPool:
         logger.info("Browser pool ready: %d idle, max %d", len(self._idle), self.max_instances)
 
     async def stop(self) -> None:
+        # Collect the sessions while the trees are still alive: the closes below
+        # take the drivers down, and then there is no subtree left to walk.
+        all_drivers = (
+            self._driver_sessions + self._scrapling_sessions + self._solver_sessions
+        )
+        sessions = await asyncio.to_thread(proctree.tree_sessions, all_drivers)
         if self._cdp_browser is not None:
             try:
                 await self._cdp_browser.close()
@@ -242,6 +268,15 @@ class BrowserPool:
                 pass
         if self._pw is not None:
             await self._pw.stop()
+        # Everything above asks nicely. A driver that ignored the close, or a
+        # browser tree that failed to go away with it, dies here: one killpg per
+        # session covers the driver and every process under it.
+        await asyncio.to_thread(
+            proctree.kill_sessions, sessions, all_drivers, "pool shutdown"
+        )
+        self._driver_sessions = []
+        self._scrapling_sessions = []
+        self._solver_sessions = []
         self._started = False
         metrics.set_session_open("scrapling", False)
         metrics.observe_session_close("scrapling", "shutdown")
@@ -485,11 +520,21 @@ class BrowserPool:
         """
         async with self._session_lock:
             if self._scrapling_session is not None:
+                sessions = await asyncio.to_thread(
+                    proctree.tree_sessions, self._scrapling_sessions
+                )
                 try:
                     await self._scrapling_session.close()
                 except Exception:  # noqa: BLE001
                     pass
                 self._scrapling_session = None
+                await asyncio.to_thread(
+                    proctree.kill_sessions,
+                    sessions,
+                    self._scrapling_sessions,
+                    "scrapling recycle",
+                )
+                self._scrapling_sessions = []
             from scrapling.fetchers import AsyncStealthySession
 
             launch_started = time.monotonic()
@@ -502,10 +547,17 @@ class BrowserPool:
                 useragent=self.user_agent,
             )
             try:
-                await self._scrapling_session.start()
+                session = self._scrapling_session
+                if session is None:
+                    raise RuntimeError("scrapling session was not created")
+                sessions: list[int] = []
+                async with proctree.capture() as sessions:
+                    await session.start()
             except BaseException:
                 metrics.observe_launch("scrapling", "error", time.monotonic() - launch_started)
+                proctree.kill_trees(sessions, reason="failed start")
                 raise
+            self._scrapling_sessions = sessions
             metrics.observe_launch("scrapling", "ok", time.monotonic() - launch_started)
             metrics.set_session_open("scrapling", True)
             self._scrapling_started = time.monotonic()
@@ -537,11 +589,21 @@ class BrowserPool:
         """Drop the lazy solver session so the next retry builds a fresh one."""
         async with self._solver_lock:
             if self._solver_session is not None:
+                sessions = await asyncio.to_thread(
+                    proctree.tree_sessions, self._solver_sessions
+                )
                 try:
                     await self._solver_session.close()
                 except Exception:  # noqa: BLE001
                     pass
                 self._solver_session = None
+                await asyncio.to_thread(
+                    proctree.kill_sessions,
+                    sessions,
+                    self._solver_sessions,
+                    "solver reset",
+                )
+                self._solver_sessions = []
             logger.warning("Scrapling solver session reset (%s)", reason)
 
     async def _scrapling_call(
@@ -743,10 +805,17 @@ class BrowserPool:
         self._recycle_pending = False
         self._scrapling_renders = 0
         if session is not None:
+            sessions = await asyncio.to_thread(
+                proctree.tree_sessions, self._scrapling_sessions
+            )
             try:
                 await asyncio.wait_for(session.close(), 20)
             except BaseException:  # noqa: BLE001 (cleanup never raises)
                 logger.exception("Closing the idle scrapling session failed")
+            await asyncio.to_thread(
+                proctree.kill_sessions, sessions, self._scrapling_sessions, "scrapling idle"
+            )
+            self._scrapling_sessions = []
             logger.info(
                 "Scrapling session closed (idle for %ss)", self.session_idle_timeout
             )
@@ -790,7 +859,17 @@ class BrowserPool:
                     solve_cloudflare=True,
                     useragent=self.user_agent,
                 )
-                await self._solver_session.start()
+                solver = self._solver_session
+                if solver is None:
+                    raise RuntimeError("solver session was not created")
+                sessions: list[int] = []
+                try:
+                    async with proctree.capture() as sessions:
+                        await solver.start()
+                except BaseException:
+                    proctree.kill_trees(sessions, reason="failed start")
+                    raise
+                self._solver_sessions = sessions
                 logger.info("Scrapling solver session ready (last-resort anti-bot retry)")
         return self._solver_session
 
@@ -1000,6 +1079,9 @@ class SearchBrowser:
         self._owns_context = False
         self._render_lock: Optional[asyncio.Lock] = None
         self.started = False
+        # One driver session per search: this browser is launched and closed
+        # inside a single request, so the session is killed on stop().
+        self._driver_sessions: list[int] = []
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1037,7 +1119,14 @@ class SearchBrowser:
         else:
             from playwright.async_api import async_playwright
 
-        self._pw = await async_playwright().start()
+        sessions: list[int] = []
+        try:
+            async with proctree.capture() as sessions:
+                self._pw = await async_playwright().start()
+        except BaseException:
+            proctree.kill_trees(sessions, reason="failed start")
+            raise
+        self._driver_sessions.extend(sessions)
         if self.mode == "cdp":
             self._browser = await self._pw.chromium.connect_over_cdp(
                 endpoint_url=self.cdp_url,
@@ -1084,6 +1173,9 @@ class SearchBrowser:
         """
         page, context, browser, pw = self._page, self._context, self._browser, self._pw
         owns_context, mode = self._owns_context, self.mode
+        # Collect the session before the drain: closing the driver leaves no tree
+        # to walk, and the browser would then only die with the janitor's sweep.
+        sessions = await asyncio.to_thread(proctree.tree_sessions, self._driver_sessions)
         self._page = None
         self._context = None
         self._browser = None
@@ -1104,6 +1196,12 @@ class SearchBrowser:
                 await _quiet_close(pw.stop())
 
         await _finish_in_background(asyncio.ensure_future(_drain()))
+        # Close first, kill after: a browser that ignored close, or a driver left
+        # behind by a failed close, goes away here.
+        await asyncio.to_thread(
+            proctree.kill_sessions, sessions, self._driver_sessions, "search close"
+        )
+        self._driver_sessions = []
 
     async def __aenter__(self) -> "SearchBrowser":
         try:

@@ -91,15 +91,19 @@ memory: 0 on every engine means no Chromium tree is alive. Launches are the
 | `forage_cache_events_total` | counter | `op` (`search`/`extract`), `result` (`hit`/`miss`) |
 | `forage_cache_entries` | gauge | `op` |
 
-### Reaper
+### Session janitor
 
 | Series | Type | Labels |
 |---|---|---|
-| `forage_reaper_sweeps_total` | counter | – |
-| `forage_reaper_kills_total` | counter | – |
+| `forage_janitor_sweeps_total` | counter | – |
+| `forage_janitor_kills_total` | counter | – |
 
-A non-zero `kills` means a worker died (OOM, crash, restart) and left browsers
-behind. It should stay at zero in healthy operation.
+Every browser driver runs in its own session and the code that opened it kills
+that session when it closes. `kills` above zero means the janitor had to step in:
+a worker died before it could close (OOM, crash, restart), or a Playwright browser
+was left with no live driver above it. Reaping crashpad handlers of dead browsers
+also counts here, which is why a small non-zero number is normal after a hard
+kill, and not a sign of a leak.
 
 ### Process and container
 

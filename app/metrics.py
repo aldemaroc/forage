@@ -198,17 +198,17 @@ CACHE_ENTRIES = _gauge(
     mode="livesum",
 )
 
-# --- Reaper ----------------------------------------------------------------
+# --- Session janitor -------------------------------------------------------
 
-REAPER_SWEEPS = Counter(
-    "forage_reaper_sweeps_total",
-    "Orphan sweeps run.",
+JANITOR_SWEEPS = Counter(
+    "forage_janitor_sweeps_total",
+    "Session janitor sweeps run.",
     registry=REG,
 )
 
-REAPER_KILLS = Counter(
-    "forage_reaper_kills_total",
-    "Process trees killed by the orphan reaper.",
+JANITOR_KILLS = Counter(
+    "forage_janitor_kills_total",
+    "Browser sessions killed after their owner was gone or nobody was driving them.",
     registry=REG,
 )
 
@@ -330,11 +330,11 @@ def observe_session_close(engine: str, reason: str) -> None:
     BROWSER_SESSION_CLOSES.labels(engine=engine, reason=reason).inc()
 
 
-def observe_reaper(sweeps: int = 0, kills: int = 0) -> None:
+def observe_janitor(sweeps: int = 0, kills: int = 0) -> None:
     if sweeps:
-        REAPER_SWEEPS.inc(sweeps)
+        JANITOR_SWEEPS.inc(sweeps)
     if kills:
-        REAPER_KILLS.inc(kills)
+        JANITOR_KILLS.inc(kills)
 
 
 def observe_engine(

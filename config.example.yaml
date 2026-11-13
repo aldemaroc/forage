@@ -12,8 +12,7 @@ server:
   port: 3672               # default port (T9 of "FORA"); customize freely
   workers: 2               # uvicorn workers
   log_level: info          # debug | info | warning | error
-  reap_orphans: true       # kill processes left behind by a dead worker
-  reap_interval: 30        # seconds between orphan sweeps
+  janitor_interval: 30     # seconds between sweeps for sessions left by a dead worker
 
 # --- Cache --------------------------------------------------
 # In-memory LRU only. Master switch: when enabled: false, ALL caching is off

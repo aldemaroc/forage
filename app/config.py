@@ -118,11 +118,16 @@ class ServerConfig:
     port: int = 3672
     workers: int = 2
     log_level: str = "info"
-    # Kill processes orphaned by a dead worker (Playwright drivers and the
-    # Chromium trees they started) instead of letting them hold task slots and
-    # memory for the lifetime of the container.
-    reap_orphans: bool = True
-    reap_interval: int = 30
+    # Every browser driver runs in its own session and its owner kills the session
+    # on teardown. This interval belongs to the supervisor's janitor, which only
+    # handles sessions whose owning worker died before it could close them.
+    janitor_interval: int = 30
+
+
+# Keys that older config files still carry. They are dropped with a warning
+# instead of failing the load: an operator upgrading the image should not have to
+# edit the config file for a knob that no longer exists.
+RETIRED_SERVER_KEYS = ("reap_orphans", "reap_interval")
 
 
 @dataclass(frozen=True)
@@ -276,8 +281,18 @@ class ForageConfig:
         browser = data.get("browser", {})
         auth = data.get("auth", {})
         metrics = data.get("metrics", {})
+        server_params = {}
+        for key, value in server.items():
+            if key in RETIRED_SERVER_KEYS:
+                logging.getLogger(__name__).warning(
+                    "Config key server.%s is no longer used and was ignored "
+                    "(browser sessions are killed per request now)",
+                    key,
+                )
+                continue
+            server_params[key] = value
         return cls(
-            server=ServerConfig(**server),
+            server=ServerConfig(**server_params),
             cache=CacheConfig(
                 enabled=cache.get("enabled", True),
                 max_entries=cache.get("max_entries", 500),

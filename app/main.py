@@ -42,7 +42,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from . import __version__
-from . import metrics
+from . import metrics, proctree
 from .auth import extract_bearer, key_is_valid, load_api_keys
 from .browser import BrowserPool, SearchBrowser
 from .cache import TTLCache
@@ -50,7 +50,6 @@ from .config import load_config
 from .display import ensure_display, stop_display
 from .extract import extract_url
 from .firecrawl import API_PREFIXES, build_firecrawl_routers
-from .reaper import orphan_reaper, start_reaper_thread
 from .searxng import search_searxng
 from .searxng_compat import build_searxng_router
 from .serp import search_forage
@@ -164,6 +163,13 @@ async def lifespan(_app: FastAPI):
         and not (config.browser.search.cdp_url or config.browser.cdp_url)
         and not config.browser.search.headless
     )
+    # First thing in the worker: pick this instance's session registry and patch
+    # the asyncio spawn so every browser driver becomes a session leader. The
+    # pools below warm browsers at start, so this cannot move any lower. The
+    # supervisor's janitor (started in main()) cleans up after a worker that dies
+    # without closing its browsers.
+    proctree.configure(config.server.port)
+    proctree.install()
     needs_display = (not config.browser.headless) or search_local_headful
     display = ensure_display() if needs_display else None
     for pool in browser_pools.values():
@@ -171,15 +177,6 @@ async def lifespan(_app: FastAPI):
     metrics.set_info(__version__, config.browser.engine, config.search.provider)
     metrics.set_cache_entries("search", len(search_cache))
     metrics.set_cache_entries("extract", len(extract_cache))
-    # Sweep orphans before anything else so a worker that restarted after an
-    # OOM kill starts from a clean process table, then keep sweeping: a worker
-    # that dies later leaves its browsers re-parented to PID 1 with nobody to
-    # close them.
-    reaper_task = None
-    if config.server.reap_orphans:
-        reaper_task = asyncio.create_task(
-            orphan_reaper(float(config.server.reap_interval))
-        )
     maintenance_task = None
     if config.cache.sweep_interval > 0:
         maintenance_task = asyncio.create_task(
@@ -190,12 +187,6 @@ async def lifespan(_app: FastAPI):
         maintenance_task.cancel()
         try:
             await maintenance_task
-        except BaseException:  # noqa: BLE001 (shutdown must not raise)
-            pass
-    if reaper_task is not None:
-        reaper_task.cancel()
-        try:
-            await reaper_task
         except BaseException:  # noqa: BLE001 (shutdown must not raise)
             pass
     for pool in browser_pools.values():
@@ -608,8 +599,13 @@ if __name__ == "__main__":
         )
     )
     display = ensure_display() if wants_headful else None
-    if config.server.reap_orphans:
-        start_reaper_thread(float(config.server.reap_interval))
+    # Sessions left behind by a worker that died without closing them belong to
+    # nobody once that worker is gone, so this process (the only one that
+    # outlives every worker) sweeps them.
+    proctree.configure(config.server.port)
+    proctree.reset_registry()
+    proctree.install()
+    proctree.start_janitor_thread(float(config.server.janitor_interval))
     try:
         uvicorn.run(
             "app.main:app",

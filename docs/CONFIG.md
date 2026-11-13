@@ -15,8 +15,7 @@ Resolution order: `built-in defaults → config.yaml → environment variables`.
 | `host` | `0.0.0.0` | Bind address inside the container. Bridge networking requires `0.0.0.0` (docker-proxy routes to it); the real exposure is controlled by the compose `ports:` mapping. |
 | `port` | `3672` | HTTP port (T9 of "FORA"). The app reads the config before starting uvicorn, so this is honored without rebuilding. |
 | `workers` | `2` | uvicorn worker processes. |
-| `reap_orphans` | `true` | Kill processes orphaned by a dead worker (Playwright drivers and the Chromium trees they started). A live orphan holds task slots and memory and nothing can close it anymore. Chromium's crashpad handlers (orphans by design) and the shared Xvfb are never touched. |
-| `reap_interval` | `30` | Seconds between orphan sweeps. |
+| `janitor_interval` | `30` | Seconds between sweeps of the supervisor's session janitor. Each browser driver runs in its own session, its owner kills that session on teardown, and the janitor only handles what an owner could not: a driver whose worker died, and Playwright browsers that no live driver is driving. A leaked browser can survive up to this interval. |
 | `log_level` | `info` | `debug` \| `info` \| `warning` \| `error` |
 
 ## `cache`

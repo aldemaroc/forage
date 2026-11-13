@@ -7,6 +7,31 @@ testing phase, and their history lives in the commit log.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-13
+
+### Changed
+
+- **Browsers are killed by session, and the orphan reaper is gone (issue #14).**
+  Every Playwright/Patchright driver now starts as a session leader, and the tree it
+  spawns gets its own sessions (Chromium calls `setsid` itself, the crashpad handler
+  does it again). The owner collects those sessions while the tree is alive, closes
+  the browser gracefully, then kills every collected session, on success, error,
+  timeout or cancellation. No process-tree guess decides what dies: the sessions were
+  recorded from the driver that started them.
+- The case that needs a survivor is a worker that dies before it can close its
+  browsers (OOM kill, crash, `kill -9`). The supervisor, the only process that
+  outlives every worker, runs a session janitor: it kills the tree of a driver whose
+  owner is gone (from a registry that records both pids and start times), and then
+  sweeps Playwright browsers with no live driver above them plus crashpad handlers no
+  live browser claims. Recovery there takes up to `server.janitor_interval` (30s by
+  default), which is the only window where a leaked browser can survive.
+- `forage_reaper_sweeps_total` and `forage_reaper_kills_total` are replaced by
+  `forage_janitor_sweeps_total` and `forage_janitor_kills_total`. Dashboards that
+  query the old names go empty; the new counters count sessions, not processes.
+- `server.reap_orphans` and `server.reap_interval` are gone. Config files that
+  still set them keep loading: both keys are ignored with a warning. The janitor
+  interval is `server.janitor_interval` (default 30).
+
 ## [1.2.0] - 2026-11-12
 
 ### Added
