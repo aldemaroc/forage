@@ -31,12 +31,26 @@ logger = logging.getLogger(__name__)
 
 
 def _env(key: str, default: str = "") -> str:
-    try:
-        from hermes_cli.config import get_env_value
+    """Read a value through Hermes' credential routes, not the bare environment.
 
-        val = get_env_value(key)
+    ``agent.secret_scope.get_secret`` is profile-aware, so a multiplexed gateway
+    never hands this profile another profile's key. ``get_env_value`` and the
+    process environment stay as fallbacks for older releases and plain shells.
+    """
+    val: Optional[str] = None
+    try:
+        from agent.secret_scope import get_secret
+
+        val = get_secret(key)
     except Exception:  # noqa: BLE001
         val = None
+    if val is None:
+        try:
+            from hermes_cli.config import get_env_value
+
+            val = get_env_value(key)
+        except Exception:  # noqa: BLE001
+            val = None
     if val is None:
         val = os.getenv(key, "")
     return (val or default).strip()
