@@ -76,6 +76,13 @@ extract:
   prefer_markdown: true   # negotiate Accept: text/markdown; when the server serves native
                           # markdown (e.g. via .htaccess / Vary: Accept), use it directly
                           # instead of converting HTML with trafilatura (method: "markdown")
+  allow_private_targets: false
+                          # false (default): refuse private, loopback, link-local and
+                          # cloud metadata targets, before the fetch and again on every
+                          # redirect, on both the httpx and the browser path. A refused
+                          # URL comes back as "Blocked by policy: <host> is a <reason>".
+                          # true: allow private targets (extracting your own LAN pages);
+                          # cloud metadata endpoints stay blocked either way.
   # domain_overrides: per-pattern extraction overrides. The YAML key is a
   # pattern (www-insensitive, case-insensitive):
   #   "x.com"            -> host or any subdomain

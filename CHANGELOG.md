@@ -7,6 +7,22 @@ testing phase, and their history lives in the commit log.
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-17
+
+### Added
+
+- **Outbound target policy (`extract.allow_private_targets`, default `false`).**
+  Extraction now refuses private, loopback, link-local and cloud metadata
+  targets. The check runs before every fetch, again on each redirect hop (httpx
+  follows the redirects itself so each `Location` is validated) and on the URL
+  the browser actually lands on. A refused URL comes back as
+  `Blocked by policy: <host> is a <reason>` with no content, and the message
+  names the config key. Cloud metadata endpoints stay blocked even with
+  `allow_private_targets: true`.
+- Entries carry `final_url` when the fetch landed somewhere else than the
+  requested URL, so a caller in front of the service can re-apply its own policy
+  to the redirect target.
+
 ## [1.2.1] - 2026-11-13
 
 ### Changed

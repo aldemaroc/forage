@@ -54,6 +54,7 @@ DEFAULTS: Dict[str, Any] = {
         "min_content_chars": 200,
         "raw_content_markdown": True,
         "prefer_markdown": True,   # negotiate Accept: text/markdown; use native markdown when the server serves it
+        "allow_private_targets": False,  # block private/loopback/link-local/metadata targets
         "domain_overrides": {},
     },
     "browser": {
@@ -201,6 +202,11 @@ class ExtractConfig:
     min_content_chars: int = 200
     raw_content_markdown: bool = True
     prefer_markdown: bool = True
+    # Refuse private, loopback, link-local and cloud metadata targets. Off by
+    # default: extraction is driven by URLs the caller picks (model output or a
+    # prompt-injected page), and this service usually runs on the same network
+    # as the things worth not exposing.
+    allow_private_targets: bool = False
     domain_overrides: tuple = ()
 
 

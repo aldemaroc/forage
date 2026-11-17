@@ -49,6 +49,7 @@ from .cache import TTLCache
 from .config import load_config
 from .display import ensure_display, stop_display
 from .extract import extract_url
+from .netguard import TargetBlocked
 from .firecrawl import API_PREFIXES, build_firecrawl_routers
 from .searxng import search_searxng
 from .searxng_compat import build_searxng_router
@@ -73,7 +74,8 @@ def _make_pools() -> Dict[str, BrowserPool]:
     bc = config.browser
     if eng == "chrome-local" and not bc.cdp_url:
         bc = replace(bc, cdp_url="http://172.20.0.1:9222")
-    pool = BrowserPool(bc, user_agent=config.extract.browser_user_agent)
+    pool = BrowserPool(bc, user_agent=config.extract.browser_user_agent,
+                       allow_private_targets=config.extract.allow_private_targets)
     logger.info("Extract browser pool for engine=%s", eng)
     return {eng: pool}
 
@@ -387,6 +389,12 @@ async def run_extract(
                 timeout=timeout,
                 engine=engine,
             )
+        except TargetBlocked as exc:
+            # Policy refusal, not a failure: no traceback, the message is the
+            # whole story and it names the config key that lifts the check.
+            logger.warning("Extract refused for %s: %s", url, exc)
+            metrics.observe_extract("other", "blocked", time.perf_counter() - url_started, 0)
+            return {"url": url, "error": str(exc)}
         except Exception as exc:  # noqa: BLE001
             logger.exception("Extract failed for %s", url)
             metrics.observe_extract("other", "error", time.perf_counter() - url_started, 0)

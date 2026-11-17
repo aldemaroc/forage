@@ -8,3 +8,13 @@ provides_web_providers:
   - forage
 provides_tools:
   - forage_full_extract
+optional_env:
+  - name: FORAGE_URL
+    description: "Base URL of your Forage instance (default http://localhost:3672)"
+    password: false
+  - name: FORAGE_API_KEY
+    description: "Bearer key, only when the Forage instance has auth.enabled"
+    password: true
+  - name: FORAGE_BYPASS_CACHE
+    description: "1/true to always bypass the instance cache"
+    password: false

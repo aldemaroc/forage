@@ -351,7 +351,7 @@ search:   { provider (searxng|forage), searxng_url, default_lang, engines, timeo
 extract:  { timeout, max_content_chars, only_main_content, engine, user_agent,
             browser_user_agent, respect_robots, force_render, wait_for,
             min_content_chars, raw_content_markdown, prefer_markdown,
-            domain_overrides }
+            allow_private_targets, domain_overrides }
 browser:  { engine, cdp_url, min_idle, max_instances, idle_timeout, headless,
             launch_timeout, stealth, network_idle_timeout, scroll_steps,
             challenge_timeout, solve_cloudflare, fallback_solver,

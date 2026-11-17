@@ -68,6 +68,76 @@ def _bypass_cache() -> bool:
     return _env("FORAGE_BYPASS_CACHE", "").lower() in ("1", "true", "yes")
 
 
+async def _blocked_reason(url: str) -> Optional[str]:
+    """Why Hermes refuses this URL, or None when it may be handed to Forage.
+
+    Forage fetches whatever URL it is given and follows redirects on its own,
+    so a model-chosen URL (or one a prompt-injected page put there) would reach
+    the LAN, the Docker host gateway or cloud metadata unless the policy core's
+    ``web_extract`` applies is applied here too.
+    """
+    from tools.url_safety import async_is_safe_url
+    from tools.website_policy import check_website_access
+
+    if not await async_is_safe_url(url):
+        return "private or internal network address"
+    blocked = check_website_access(url)
+    if blocked:
+        return blocked.get("message") or "blocked by the website policy"
+    return None
+
+
+def _blocked_item(url: str, reason: str, *, after_redirect: bool = False) -> Dict[str, Any]:
+    label = "Blocked by policy after redirect" if after_redirect else "Blocked by policy"
+    return {
+        "url": url,
+        "title": "",
+        "content": "",
+        "raw_content": "",
+        "error": f"{label}: {reason}",
+    }
+
+
+async def _screen(urls: List[str]) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+    """Split the request into URLs Forage may fetch and the refused entries."""
+    allowed: List[str] = []
+    refused: Dict[str, Dict[str, Any]] = {}
+    for url in urls:
+        reason = await _blocked_reason(url)
+        if reason:
+            refused[url] = _blocked_item(url, reason)
+        else:
+            allowed.append(url)
+    return allowed, refused
+
+
+async def _recheck(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Re-check the URL each entry landed on after the service's redirects."""
+    checked: List[Dict[str, Any]] = []
+    for item in items:
+        landed = item.get("final_url")
+        if landed:
+            reason = await _blocked_reason(landed)
+            if reason:
+                item = {**_blocked_item(landed, reason, after_redirect=True),
+                        "url": item.get("url") or landed}
+        checked.append(item)
+    return checked
+
+
+def _merge(urls: List[str], refused: Dict[str, Dict[str, Any]], results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Put refused and returned entries back in the caller's input order."""
+    remaining = iter(results)
+    merged: List[Dict[str, Any]] = []
+    for url in urls:
+        if url in refused:
+            merged.append(refused[url])
+        else:
+            merged.append(next(remaining, {"url": url, "title": "", "content": "",
+                                           "raw_content": "", "error": "Missing result"}))
+    return merged
+
+
 class ForageWebSearchProvider(WebSearchProvider):
     """Search + extract via the self-hosted Forage service."""
 
@@ -130,31 +200,34 @@ class ForageWebSearchProvider(WebSearchProvider):
         fmt = kwargs.get("format") or "markdown"
         formats = ["html"] if fmt == "html" else ["markdown"]
         url_list = list(urls)
+        allowed, refused = await _screen(url_list)
+        if not allowed:
+            return _merge(url_list, refused, [])
         error_items = lambda msg: [  # noqa: E731
             {"url": u, "title": "", "content": "", "raw_content": "", "error": msg}
-            for u in url_list
+            for u in allowed
         ]
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(
                     f"{base}/extract",
-                    json={"urls": url_list, "formats": formats},
+                    json={"urls": allowed, "formats": formats},
                     headers=self._headers(),
                 )
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPStatusError as exc:
-            return error_items(f"Forage returned HTTP {exc.response.status_code}")
+            return _merge(url_list, refused, error_items(f"Forage returned HTTP {exc.response.status_code}"))
         except httpx.RequestError as exc:
-            return error_items(f"Could not reach Forage at {base}: {exc}")
+            return _merge(url_list, refused, error_items(f"Could not reach Forage at {base}: {exc}"))
         except Exception as exc:  # noqa: BLE001
-            return error_items(str(exc))
+            return _merge(url_list, refused, error_items(str(exc)))
         if not data.get("success"):
-            return error_items(data.get("error", "Forage extract failed"))
+            return _merge(url_list, refused, error_items(data.get("error", "Forage extract failed")))
         # The service itself honors extract.raw_content_markdown (default
         # true), so raw_content already mirrors the clean markdown; no
         # realignment needed here.
-        return data.get("data", [])
+        return _merge(url_list, refused, await _recheck(data.get("data", [])))
 
     async def full_extract(
         self,
@@ -173,8 +246,12 @@ class ForageWebSearchProvider(WebSearchProvider):
         base = _forage_url().rstrip("/")
         fmt = format or "markdown"
         formats = ["html"] if fmt == "html" else ["markdown"]
+        url_list = list(urls)
+        allowed, refused = await _screen(url_list)
+        if not allowed:
+            return _merge(url_list, refused, [])
         payload: Dict[str, Any] = {
-            "urls": list(urls),
+            "urls": allowed,
             "formats": formats,
             "only_main_content": False,
         }
@@ -187,7 +264,7 @@ class ForageWebSearchProvider(WebSearchProvider):
 
         error_items = lambda msg: [  # noqa: E731
             {"url": u, "title": "", "content": "", "raw_content": "", "error": msg}
-            for u in urls
+            for u in allowed
         ]
         try:
             async with httpx.AsyncClient(timeout=timeout or 60) as client:
@@ -199,11 +276,11 @@ class ForageWebSearchProvider(WebSearchProvider):
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPStatusError as exc:
-            return error_items(f"Forage returned HTTP {exc.response.status_code}")
+            return _merge(url_list, refused, error_items(f"Forage returned HTTP {exc.response.status_code}"))
         except httpx.RequestError as exc:
-            return error_items(f"Could not reach Forage at {base}: {exc}")
+            return _merge(url_list, refused, error_items(f"Could not reach Forage at {base}: {exc}"))
         except Exception as exc:  # noqa: BLE001
-            return error_items(str(exc))
+            return _merge(url_list, refused, error_items(str(exc)))
         if not data.get("success"):
-            return error_items(data.get("error", "Forage extract failed"))
-        return data.get("data", [])
+            return _merge(url_list, refused, error_items(data.get("error", "Forage extract failed")))
+        return _merge(url_list, refused, await _recheck(data.get("data", [])))

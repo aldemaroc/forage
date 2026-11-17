@@ -17,6 +17,7 @@ import random as _random
 import time
 
 from . import metrics, proctree
+from .netguard import ensure_allowed
 from collections import deque
 from typing import Any, Deque, Dict, Optional, Union
 
@@ -117,8 +118,10 @@ class BrowserPool:
         max_instances (the CDP server owns the actual browser processes).
     """
 
-    def __init__(self, browser_config: Any, user_agent: Optional[str] = None) -> None:
+    def __init__(self, browser_config: Any, user_agent: Optional[str] = None,
+                 allow_private_targets: bool = False) -> None:
         self.engine = browser_config.engine
+        self.allow_private_targets = allow_private_targets
         self.cdp_url = getattr(browser_config, "cdp_url", "")  # engine=obscura / chrome-local
         self.min_idle = browser_config.min_idle
         self.max_instances = browser_config.max_instances
@@ -334,6 +337,9 @@ class BrowserPool:
         readability: bool = False,
     ) -> Union[str, Dict[str, str]]:
         """Render a URL, recording the outcome for ``/metrics``."""
+        # Checked here so every engine is covered; each path re-checks the URL
+        # the navigation actually landed on after the redirects.
+        await ensure_allowed(url, allow_private=self.allow_private_targets)
         started = time.monotonic()
         try:
             html = await self._render(
@@ -392,6 +398,9 @@ class BrowserPool:
                 wait_until="domcontentloaded",
                 timeout=timeout * 1000,
             )
+            # The server picks where the navigation lands (redirects included),
+            # so the URL page.url reports is the one that matters.
+            await ensure_allowed(page.url, allow_private=self.allow_private_targets)
             if wait_for:
                 await page.wait_for_selector(wait_for, timeout=timeout * 1000)
             else:
@@ -470,6 +479,7 @@ class BrowserPool:
                 wait_until="domcontentloaded",
                 timeout=timeout * 1000,
             )
+            await ensure_allowed(page.url, allow_private=self.allow_private_targets)
             if self.engine == "chrome-local":
                 # The Google SERP sometimes resolves its challenge a moment
                 # after domcontentloaded. A fixed 3s settle wait beats
@@ -712,6 +722,7 @@ class BrowserPool:
                     pass
             if scroll_steps > 0:
                 await self._scroll_to_bottom(page, scroll_steps)
+            result["final_url"] = page.url
             if readability:
                 try:
                     result["article"] = _parse_readability(
@@ -749,6 +760,9 @@ class BrowserPool:
                 page_action=_page_action,
                 label="scrapling",
             )
+            landed = result.get("final_url")
+            if isinstance(landed, str) and landed.startswith(("http://", "https://")):
+                await ensure_allowed(landed, allow_private=self.allow_private_targets)
             if readability and result.get("article"):
                 return result["article"]
             if resp is None or not resp.body:
@@ -892,6 +906,7 @@ class BrowserPool:
         session = await self._get_solver_session()
         steps = self.scroll_steps if scroll_steps is None else scroll_steps
         idle_cap = self.network_idle_timeout if network_idle_timeout is None else network_idle_timeout
+        landed: Dict[str, str] = {}
 
         async def _page_action(page: Any) -> None:
             if idle_cap > 0:
@@ -904,6 +919,7 @@ class BrowserPool:
                     pass
             if steps > 0:
                 await self._scroll_to_bottom(page, steps)
+            landed["url"] = page.url
 
         await self._semaphore.acquire()
         try:
@@ -916,6 +932,8 @@ class BrowserPool:
                 label="scrapling solver",
                 solver=True,
             )
+            if isinstance(landed.get("url"), str) and landed["url"].startswith(("http://", "https://")):
+                await ensure_allowed(landed["url"], allow_private=self.allow_private_targets)
             if resp is None or not resp.body:
                 raise RuntimeError(f"Empty response for {url}")
             return resp.body.decode("utf-8", errors="ignore")

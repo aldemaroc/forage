@@ -25,6 +25,7 @@ from markdownify import markdownify as _markdownify
 from .browser import BrowserPool
 from .config import ForageConfig
 from .documents import extract_document_bytes, looks_like_document
+from .netguard import TargetBlocked, ensure_allowed, get_following_redirects
 
 logger = logging.getLogger(__name__)
 
@@ -324,8 +325,14 @@ async def _extract_document(
         "Accept": "*/*",
     }
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-            resp = await client.get(url, headers=headers)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            await ensure_allowed(url, allow_private=config.extract.allow_private_targets)
+            resp = await get_following_redirects(
+                client,
+                url,
+                allow_private=config.extract.allow_private_targets,
+                headers=headers,
+            )
     except httpx.RequestError as exc:
         logger.warning("Document download failed for %s: %s", url, exc)
         return None
@@ -355,7 +362,20 @@ async def _extract_document(
         "content": text,
         "raw_content": raw_content,
         "method": method_label,
+        "final_url": str(resp.url),
     }
+
+
+def _with_final_url(result: Dict[str, Any], final_url: Optional[str], original: str) -> Dict[str, Any]:
+    """Carry the URL the fetch really landed on, so callers can re-check it.
+
+    A redirect can move a public URL onto a private target; the caller (the
+    Hermes plugin in front of this service) re-applies its own safety policy to
+    what comes back, and it can only do that if the final URL is in the entry.
+    """
+    if final_url and final_url != original:
+        result["final_url"] = final_url
+    return result
 
 
 async def fetch_static(
@@ -380,13 +400,19 @@ async def fetch_static(
         "User-Agent": config.extract.user_agent,
         "Accept": accept,
     }
-    async with httpx.AsyncClient(follow_redirects=True, timeout=config.extract.timeout) as client:
+    async with httpx.AsyncClient(timeout=config.extract.timeout) as client:
+        await ensure_allowed(url, allow_private=config.extract.allow_private_targets)
         robots_error = await _check_robots(client, config, url)
         if robots_error:
             return None, 0, url, ""  # caller treats 0 as blocked-by-robots
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                resp = await client.get(url, headers=headers)
+                resp = await get_following_redirects(
+                    client,
+                    url,
+                    allow_private=config.extract.allow_private_targets,
+                    headers=headers,
+                )
                 if resp.status_code in RETRY_STATUS and attempt < RETRY_ATTEMPTS - 1:
                     logger.info(
                         "%s -> HTTP %d (transient), retrying in %.1fs",
@@ -527,6 +553,10 @@ async def extract_url(
         logger.info("%s -> URL rewritten to %s", url, rewritten)
         url = rewritten
 
+    # Outbound target policy: refuse private/internal targets before any fetch
+    # (the static and browser paths re-check each redirect hop themselves).
+    await ensure_allowed(url, allow_private=config.extract.allow_private_targets)
+
     # Documents (pdf/docx/xlsx/pptx/rtf) are extracted from raw bytes -
     # never through the browser (Chromium renders PDFs poorly). Falls back
     # to the hybrid flow when the URL is not actually a document.
@@ -534,7 +564,7 @@ async def extract_url(
         doc_result = await _extract_document(config, url, effective_timeout)
         if doc_result is not None:
             doc_result["url"] = original_url
-            return doc_result
+            return _with_final_url(doc_result, doc_result.pop("final_url", None), original_url)
 
     # The extract engine (trafilatura vs readability) applies ONLY to browser
     # renders. It must NOT force the browser: pages that extract fine with
@@ -545,12 +575,13 @@ async def extract_url(
     html: Optional[Union[str, Dict[str, str]]] = None
     status = 0
     content_type = ""
+    fetched_url: Optional[str] = None
     native_markdown = False
     readability_title: Optional[str] = None
     readability_rendered = False
 
     if not want_browser:
-        html, status, _, content_type = await fetch_static(config, url)
+        html, status, fetched_url, content_type = await fetch_static(config, url)
         if status == 0:
             # network error or robots-blocked; browser rarely helps, fail clean
             return {"url": original_url, "error": "Failed to fetch URL (network error or robots.txt)"}
@@ -587,7 +618,7 @@ async def extract_url(
         }
         if url != original_url:
             result["rewritten_url"] = url
-        return result
+        return _with_final_url(result, fetched_url, original_url)
 
     if want_browser:
         try:
@@ -607,6 +638,8 @@ async def extract_url(
                 html = html.get("content") or ""
             else:
                 readability_title = None
+        except TargetBlocked:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("Browser render failed for %s: %s", url, exc)
             if html is None:
@@ -639,6 +672,8 @@ async def extract_url(
                     readability_rendered = True
                     readability_title = html.get("title") or ""
                     html = html.get("content") or ""
+            except TargetBlocked:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Browser render failed for %s: %s", url, exc)
 
@@ -669,6 +704,8 @@ async def extract_url(
                     scroll_steps=_scroll_steps_for(config, effective_scroll),
                     network_idle_timeout=effective_idle,
                 )
+            except TargetBlocked:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Solver retry failed for %s: %s", url, exc)
                 solver_html = None
@@ -707,4 +744,4 @@ async def extract_url(
     }
     if url != original_url:
         result["rewritten_url"] = url
-    return result
+    return _with_final_url(result, fetched_url, original_url)
