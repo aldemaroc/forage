@@ -7,6 +7,8 @@ testing phase, and their history lives in the commit log.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-19
+
 ### Added
 
 - **Plugin timeouts come from the environment (issue #16).** The Hermes plugin
