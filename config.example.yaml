@@ -52,6 +52,15 @@ search:
   engines: [google, bing, duckduckgo]
   timeout: 15              # seconds per search (provider=searxng)
   serp_timeout: 20         # seconds per SERP render (provider=forage)
+  # provider=forage: recover the exact result URL. Google puts an encrypted
+  # token in the anchor (/goto?url=) instead of the URL, so each pending result
+  # costs one small HTTP request through the search browser's request context
+  # (same cookies, never a page render). Results that cannot be resolved keep
+  # the URL rebuilt from the visible <cite> breadcrumb, and the engine summary
+  # reports url_fallback. false = no extra request, breadcrumb only.
+  resolve_urls: true
+  resolve_timeout: 8       # seconds per redirect resolution request
+  resolve_budget: 15       # seconds for the whole resolution pass (then breadcrumb)
 
 # --- Extract ------------------------------------------------
 extract:

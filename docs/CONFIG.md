@@ -44,6 +44,9 @@ Bypass per request with the `Cache-Control: no-cache` header; the response heade
 | `timeout` | `15` | Timeout in seconds per search request (provider=searxng). |
 | `provider` | `forage` | Search backend. `forage` (default) uses Forage's own SERP engines (browser render + DOM parse per engine, no SearXNG needed); `searxng` aggregates through the SearXNG instance. Each engine's result is classified `ok` / `no_results` / `error` (challenge, timeout, http, network or parse), so a CAPTCHA page is never mistaken for an empty answer and vice versa. |
 | `serp_timeout` | `20` | Seconds per SERP render (provider=forage). |
+| `resolve_urls` | `true` | provider=forage: recover the exact result URL when the engine only puts an opaque redirect token in the anchor (Google `/goto?url=`). Each pending result costs one small HTTP request through the search browser's own request context (same cookies, no page render), sent in parallel and capped by `resolve_timeout`. Results that cannot be resolved keep the URL rebuilt from the visible `<cite>` breadcrumb, and the engine summary then reports `url_fallback`. Set `false` to never make those extra requests: URLs then come only from inline wrappers and the breadcrumb. |
+| `resolve_timeout` | `8` | Seconds per redirect resolution request (provider=forage, `resolve_urls: true`). |
+| `resolve_budget` | `15` | Seconds for the whole URL resolution pass (provider=forage). Tokens still unresolved when the budget runs out are skipped and keep the breadcrumb URL, so URL recovery can never stall a search. |
 
 ## `extract`
 
@@ -180,10 +183,26 @@ Metrics run in prometheus_client's multiprocess mode (`PROMETHEUS_MULTIPROC_DIR`
 set to `/tmp/forage-prometheus`), so counters merge across `server.workers`
 instead of each worker reporting only its own.
 
+## Request log
+
+`GET /admin/requests?limit=100&kind=search|extract&status=ok|error` returns the
+most recent searches and extractions, newest first: one event per search and one
+per extracted URL, with `status`, `ms`, `cache`, the query/URL, the result count
+and the per-engine outcome (`engines`), or the error message.
+
+It is backed by an append-only JSONL (`FORAGE_REQLOG`, default
+`/var/lib/forage/requests.jsonl`) rather than process memory, because
+`server.workers > 1` would otherwise show only the requests that happened to
+land on the worker answering the call. Mount a volume on that directory to keep
+the log across container re-creates. Records are capped by size (one rotation)
+and the log never fails a request.
+
 ## Environment variables
 
 | Variable | Where | Purpose |
 |---|---|---|
+| `FORAGE_REQLOG` | service `.env` | Request log path (default `/var/lib/forage/requests.jsonl`). Set to `off` to disable it. |
+| `FORAGE_REQLOG_MAX_BYTES` | service `.env` | Size that triggers one rotation to `<path>.1` (default `4194304`, i.e. 4 MB). |
 | `FORAGE_API_KEYS` | service `.env` | Comma-separated Bearer API keys (used when `auth.enabled: true`). |
 | `FORAGE_CONFIG` | service `.env` | Config file path inside the container (default `/etc/forage/config.yaml`). |
 | `TZ` | service `.env` | Container timezone. |

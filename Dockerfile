@@ -22,8 +22,9 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && patchright install chromium \
     && scrapling install
 
-# Application code
+# Application code (tests included: they run with `python -m unittest discover -s tests`)
 COPY app/ app/
+COPY tests/ tests/
 
 # Factory-default config (users override via bind mount in compose)
 COPY config.example.yaml /etc/forage/config.yaml

@@ -37,10 +37,12 @@ The JSON envelope keeps the Hermes web-search contract:
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -92,12 +94,152 @@ def _clean_text(node) -> str:
     return node.get_text(" ", strip=True)
 
 
-def _visible_url(cite_text: str) -> str:
-    """Take a search-engine visible URL (may contain breadcrumb ' › ')."""
-    for sep in (" › ", " > ", " ›", "\u203a"):
-        if sep in cite_text:
-            cite_text = cite_text.split(sep)[0]
-    return cite_text.strip()
+# ---------------------------------------------------------------------------
+# Result URL recovery
+# ---------------------------------------------------------------------------
+#
+# Search engines do not hand out the destination URL in the DOM. Each one hides
+# it a different way, and the parsers below undo it, in this order of cost:
+#
+# * inline unwrap (no request): the anchor carries the URL inside a redirect
+#   wrapper (Google ``/url?q=``, Bing ``/ck/a?u=``, DuckDuckGo ``/l/?uddg=``,
+#   Yahoo ``/RU=``);
+# * redirect resolve (one HTTP request per result): the anchor carries an opaque
+#   token that only the engine can decode (Google ``/goto?url=``). Handled by
+#   ``SearchBrowser.resolve_redirects``;
+# * breadcrumb rebuild (always available, lossy): the visible ``<cite>`` prints
+#   the URL segmented by ``›``, and long paths arrive truncated with ``…``.
+#
+# ``url_source`` on each result says which of the three produced the URL.
+
+# Separators a SERP puts where the URL had a slash (›, », >).
+_BREADCRUMB_SPLIT = re.compile(r"\s*[\u203a\u00bb>]\s*")
+_TRUNCATION_MARKS = ("\u2026", "...")  # …, ...
+_DOMAIN_START = re.compile(
+    r"^(?:https?://)?[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:[:/]|$)", re.IGNORECASE
+)
+
+
+def _cite_url(cite_text: str) -> str:
+    """Rebuild a URL from the breadcrumb a SERP prints under the title.
+
+    ``https://example.com › blog › post`` becomes
+    ``https://example.com/blog/post``: joining the segments is the only way the
+    path survives, since cutting at the first separator (the old behaviour) left
+    nothing but the host. A trailing segment cut with ``…`` is dropped, because
+    half a slug is not a URL.
+
+    Returns "" when the text is not a URL at all: Google prints the date there
+    for some cards (``há 8 meses``), and Brave prints the age for forum threads.
+    """
+    text = (cite_text or "").strip()
+    if not text:
+        return ""
+    parts = [part.strip() for part in _BREADCRUMB_SPLIT.split(text) if part.strip()]
+    if not parts or not _DOMAIN_START.match(parts[0]):
+        return ""
+    head = parts[0]
+    if not head.lower().startswith(("http://", "https://")):
+        head = "https://" + head
+    tail = parts[1:]
+    while tail and tail[-1].endswith(_TRUNCATION_MARKS):
+        tail.pop()
+    return head.rstrip("/") + ("/" + "/".join(tail) if tail else "")
+
+
+def _absolutize(href: str) -> str:
+    href = (href or "").strip()
+    if href.startswith("//"):
+        return "https:" + href
+    return href
+
+
+def _google_wrapped_target(href: str) -> str:
+    """Google's plain wrapper: ``/url?q=<target>&sa=U``."""
+    if "/url?q=" not in href:
+        return ""
+    match = re.search(r"[?&]q=([^&]+)", href)
+    return unquote(match.group(1)) if match else ""
+
+
+def _bing_wrapped_target(href: str) -> str:
+    """Bing wraps every organic link: ``/ck/a?...&u=a1<base64url>``.
+
+    The token is the target URL with an ``a1`` version prefix, base64url
+    encoded. Decoding it is lossless, query string included.
+    """
+    parsed = urlsplit(href)
+    if not parsed.netloc.lower().endswith("bing.com") or "/ck/a" not in parsed.path:
+        return ""
+    token = (parse_qs(parsed.query).get("u") or [""])[0]
+    if not token.startswith("a1"):
+        return ""
+    payload = token[2:]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        return base64.urlsafe_b64decode(payload).decode("utf-8", "replace")
+    except (ValueError, TypeError):
+        return ""
+
+
+def _ddg_wrapped_target(href: str) -> str:
+    """DuckDuckGo's html endpoint: ``/l/?uddg=<urlencoded target>``."""
+    parsed = urlsplit(href)
+    if not parsed.netloc.lower().endswith("duckduckgo.com") or not parsed.path.startswith("/l/"):
+        return ""
+    match = re.search(r"[?&]uddg=([^&]+)", href)
+    return unquote(match.group(1)) if match else ""
+
+
+def _yahoo_wrapped_target(href: str) -> str:
+    """Yahoo's ad/redirect wrapper: ``.../RU=<urlencoded target>/RK=...``."""
+    if "r.search.yahoo.com" not in href:
+        return ""
+    match = re.search(r"/RU=([^/]+)/", href)
+    return unquote(match.group(1)) if match else ""
+
+
+_WRAPPED_TARGETS = (
+    _google_wrapped_target,
+    _bing_wrapped_target,
+    _ddg_wrapped_target,
+    _yahoo_wrapped_target,
+)
+
+
+def _unwrap_href(href: str) -> str:
+    """Destination behind an engine redirect wrapper, or "" when there is none.
+
+    A plain ``http`` href is returned as is: not every engine wraps its links.
+    """
+    href = _absolutize(href)
+    if not href:
+        return ""
+    for unwrap in _WRAPPED_TARGETS:
+        target = _absolutize(unwrap(href))
+        if target.startswith("http"):
+            return target
+    return href if href.startswith("http") else ""
+
+
+def _redirect_token(href: str, base: str = "https://www.google.com") -> str:
+    """Opaque redirect token that has to be resolved over HTTP (Google ``/goto``).
+
+    The token is encrypted rather than encoded: decoding it locally does not
+    work, only following it does.
+    """
+    href = (href or "").strip()
+    if "/goto?url=" not in href:
+        return ""
+    return href if href.startswith("http") else urljoin(base, href)
+
+
+def _result(title: str, url: str, description: str, source: str, token: str = "") -> Dict[str, str]:
+    """One parsed result. ``token`` is dropped by the resolver once spent."""
+    entry = {"title": title, "url": url, "description": description, "url_source": source}
+    if token:
+        entry["resolve"] = token
+    return entry
 
 
 def _build_google_url(query: str, language: str, limit: int) -> str:
@@ -137,40 +279,48 @@ def _build_brave_url(query: str, language: str, limit: int) -> str:
 def _parse_google(html: str, _language: str) -> List[Dict[str, str]]:
     """Google organic results.
 
-    Google obfuscates the <a href> (``/goto?url=``), but the visible URL in
-    ``<cite>`` is the real destination and parses cleanly.
+    Google obfuscates the ``<a href>``: ``/goto?url=<encrypted token>`` cannot be
+    decoded locally, only followed, so the parser keeps the token and the
+    resolver spends it later (``_apply_redirect_resolution``). The ``<cite>``
+    breadcrumb is the fallback, and the only source for cards Google renders
+    without a usable link (top stories, video blocks).
     """
     soup = BeautifulSoup(html, "html.parser")
     results: List[Dict[str, str]] = []
+
+    def add(h3, cite_text: str, snippet: str) -> None:
+        title = h3.get_text(" ", strip=True)
+        if not title:
+            return
+        anchor = h3.find_parent("a")
+        href = str(anchor.get("href", "")) if anchor else ""
+        url = _unwrap_href(href)
+        cite = _cite_url(cite_text)
+        token = "" if url else _redirect_token(href)
+        results.append(
+            _result(title, url or cite, snippet, "href" if url else "cite", token)
+        )
+
     for div in soup.select("div.MjjYud"):
         h3 = div.find("h3")
         if not h3:
             continue
-        title = h3.get_text(" ", strip=True)
-        cite = _visible_url(_clean_text(div.select_one("cite")))
         snippet = _clean_text(
             div.select_one("div.VwiC3b") or div.select_one("div.IsZvec")
         )
-        if title:
-            results.append(
-                {"title": title, "url": cite or "", "description": snippet}
-            )
+        add(h3, _clean_text(div.select_one("cite")), snippet)
     if results:
         return results
     # Fallback: older/newer layouts - h3 with the next <cite> sibling.
     for h3 in soup.find_all("h3"):
-        title = h3.get_text(" ", strip=True)
-        cite = _visible_url(_clean_text(h3.find_next("cite")))
-        if title:
-            results.append(
-                {"title": title, "url": cite or "", "description": ""}
-            )
+        add(h3, _clean_text(h3.find_next("cite")), "")
     return results
 
 
 def _parse_bing(html: str, _language: str) -> List[Dict[str, str]]:
-    """Bing organic results (li.b_algo). href is a /ck/a redirect wrapper,
-    so the visible URL comes from <cite> (clean when no breadcrumb)."""
+    """Bing organic results (li.b_algo). The href is a ``/ck/a`` wrapper whose
+    ``u=a1<base64url>`` parameter is the exact destination: decoded inline, no
+    request. The ``<cite>`` (breadcrumb, often truncated) is the fallback."""
     soup = BeautifulSoup(html, "html.parser")
     results: List[Dict[str, str]] = []
     for li in soup.select("li.b_algo"):
@@ -178,7 +328,8 @@ def _parse_bing(html: str, _language: str) -> List[Dict[str, str]]:
         if not h2a:
             continue
         title = h2a.get_text(" ", strip=True)
-        cite = _visible_url(_clean_text(li.select_one("cite")))
+        url = _unwrap_href(str(h2a.get("href", "")))
+        cite = _cite_url(_clean_text(li.select_one("cite")))
         snippet = _clean_text(
             li.select_one(".b_caption p")
             or li.select_one(".b_lineclamp4")
@@ -186,13 +337,17 @@ def _parse_bing(html: str, _language: str) -> List[Dict[str, str]]:
         )
         if title:
             results.append(
-                {"title": title, "url": cite or "", "description": snippet}
+                _result(title, url or cite, snippet, "href" if url else "cite")
             )
     return results
 
 
 def _parse_yahoo(html: str, _language: str) -> List[Dict[str, str]]:
-    """Yahoo organic results (div.compTitle, direct <a href> with real URL)."""
+    """Yahoo organic results (div.compTitle, direct <a href> with the real URL).
+
+    Yahoo only wraps ads and some redirects (``r.search.yahoo.com``...``RU=``),
+    which ``_unwrap_href`` also decodes.
+    """
     soup = BeautifulSoup(html, "html.parser")
     results: List[Dict[str, str]] = []
     for block in soup.select("div.compTitle"):
@@ -200,33 +355,31 @@ def _parse_yahoo(html: str, _language: str) -> List[Dict[str, str]]:
         h3 = block.find("h3")
         if not a or not h3:
             continue  # "Searches related to" / "See results about" boxes have no h3
-        href = a["href"]
-        if not href.startswith("http"):
-            continue
         title = h3.get_text(" ", strip=True)
+        url = _unwrap_href(str(a["href"]))
+        if not url:
+            continue
         snippet = _clean_text(block.find_next("div", class_="compText"))
-        results.append(
-            {"title": title, "url": href, "description": snippet}
-        )
+        results.append(_result(title, url, snippet, "href"))
     return results
 
 
 def _parse_ddg(html: str, _language: str) -> List[Dict[str, str]]:
-    """DuckDuckGo html endpoint results (.result__a, direct href)."""
+    """DuckDuckGo html endpoint results (.result__a).
+
+    Every link is ``//duckduckgo.com/l/?uddg=<urlencoded target>``: the target is
+    decoded inline, no request.
+    """
     soup = BeautifulSoup(html, "html.parser")
     results: List[Dict[str, str]] = []
     for a in soup.select("a.result__a"):
-        href = a.get("href", "")
-        if href.startswith("//"):
-            href = "https:" + href
-        if not href.startswith("http"):
+        url = _unwrap_href(str(a.get("href", "")))
+        if not url:
             continue
         title = a.get_text(" ", strip=True)
         snippet = _clean_text(a.find_next("a", class_="result__snippet"))
         if title:
-            results.append(
-                {"title": title, "url": href, "description": snippet}
-            )
+            results.append(_result(title, url, snippet, "href"))
     return results
 
 
@@ -235,8 +388,12 @@ def _parse_brave(html: str, _language: str) -> List[Dict[str, str]]:
 
     Brave renders its own markup (Svelte components, no ``<h3>``): each result
     is a ``div.snippet[data-type=web]`` holding a ``.title`` and a
-    ``.generic-snippet .content`` description. The anchor ``href`` is the real
-    destination (no redirect wrapper).
+    ``.generic-snippet .content`` description. The anchor href is
+    ``/go/v1#<token>``: the destination lives in the fragment, which the page
+    resolves in the browser and never appears in the DOM. Navigating one page per
+    result to recover it costs more than the search itself, so the URL comes from
+    the ``<cite>`` breadcrumb (``url_source: cite``) and may lose a truncated
+    tail.
     """
     soup = BeautifulSoup(html, "html.parser")
     results: List[Dict[str, str]] = []
@@ -245,17 +402,20 @@ def _parse_brave(html: str, _language: str) -> List[Dict[str, str]]:
         anchor = block.select_one("a.l1") or block.find("a", href=True)
         if anchor is None:
             continue
-        href = str(anchor.get("href", ""))
-        if not href.startswith("http"):
-            continue
         title = _clean_text(block.select_one(".title")) or _clean_text(anchor)
+        url = _unwrap_href(str(anchor.get("href", "")))
+        cite = _cite_url(_clean_text(block.select_one("cite")))
+        if not url and not cite:
+            continue
         snippet = _clean_text(
             block.select_one(".generic-snippet .content")
             or block.select_one(".content")
             or block.select_one(".snippet-description")
         )
         if title:
-            results.append({"title": title, "url": href, "description": snippet})
+            results.append(
+                _result(title, url or cite, snippet, "href" if url else "cite")
+            )
     return results
 
 
@@ -408,15 +568,96 @@ def _classify(engine: str, html: str) -> Tuple[str, Optional[str], Optional[str]
 def _normalize_url(url: str) -> str:
     url = url.strip()
     if url.startswith("//"):
-        url = "https:" + url
+        url = "https://" + url
     if url.startswith("http"):
         return url.split("#")[0].rstrip("/")
     return ""
 
 
+def _dedupe_key(result: Dict[str, Any]) -> Tuple[str, str]:
+    """Identity of a result for de-duplication.
+
+    A URL taken from the anchor is exact, so the URL alone identifies the result.
+    A URL rebuilt from the breadcrumb may be truncated, so the title is part of
+    the key: keying on the approximate URL alone collapsed every result of the
+    same host into the first one, which is how a 10-result Google SERP turned into
+    a handful of bare domains.
+    """
+    url = _normalize_url(str(result.get("url", "")))
+    if not url:
+        return ("", "")
+    if result.get("url_source") in ("href", "resolved"):
+        return (url, "")
+    return (url, str(result.get("title", "")))
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
+
+async def _apply_redirect_resolution(
+    config: Any,
+    browser: Any,
+    results: List[Dict[str, Any]],
+    referer: str,
+    engine: str = "",
+) -> int:
+    """Spend the redirect tokens the parsers collected (Google ``/goto``).
+
+    Runs once the result list is final, so only URLs that are actually returned
+    cost a request. Each token is one small HTTP request through the browser's
+    own request context (same cookies as the SERP), never a page render, and the
+    ones that miss fall back to a committed navigation. A token that cannot be
+    resolved keeps the breadcrumb URL: the result still works, and ``url_source``
+    says the URL is approximate.
+
+    Returns the number of results left on the breadcrumb fallback.
+    """
+    pending = [r for r in results if r.get("resolve")]
+    if not pending:
+        return 0
+    if not getattr(config.search, "resolve_urls", True):
+        for result in pending:
+            result.pop("resolve", None)
+            result.pop("resolve_referer", None)
+        return 0
+    targets = [str(result["resolve"]) for result in pending]
+    timeout = getattr(config.search, "resolve_timeout", 8)
+    budget = getattr(config.search, "resolve_budget", 15)
+    deadline = time.monotonic() + max(1, budget)
+    try:
+        resolved = list(
+            await browser.resolve_redirects(
+                targets, referer=referer, timeout=timeout, budget=budget
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 (a resolver bug must not kill the search)
+        logger.warning("URL resolution failed, keeping the breadcrumb fallback: %s", exc)
+        resolved = [None] * len(targets)
+    # Second stage: the engine throttles the redirect endpoint after a handful of
+    # hops, but a real navigation still lands. It costs a committed navigation
+    # (never a full load), so it only runs for what the first stage missed and
+    # only while the budget lasts.
+    for index, final in enumerate(resolved):
+        if final is not None or time.monotonic() >= deadline:
+            continue
+        resolved[index] = await browser.resolve_by_navigation(targets[index], timeout=timeout)
+    for result, final in zip(pending, resolved or []):
+        result.pop("resolve", None)
+        result.pop("resolve_referer", None)
+        if final:
+            result["url"] = final
+            result["url_source"] = "resolved"
+    unresolved = [r for r in pending if r.get("url_source") != "resolved"]
+    if unresolved:
+        logger.warning(
+            "%d of %d %s results kept the <cite> breadcrumb URL: the redirect token did not resolve",
+            len(unresolved),
+            len(pending),
+            engine or "this engine",
+        )
+    return len(unresolved)
 
 
 async def _fetch_engine(
@@ -496,6 +737,9 @@ async def _fetch_engine(
                 failures.append(f"{browser_engine or browser.engine}: parse raised {exc}")
                 logger.warning("SERP %s parse raised on browser %s: %s", engine, browser_engine, exc)
                 continue
+            for result in results:
+                if result.get("resolve"):
+                    result["resolve_referer"] = url
             metrics.observe_engine(
                 engine,
                 results=len(results),
@@ -503,7 +747,12 @@ async def _fetch_engine(
                 http=http_seconds,
                 ok=True,
             )
-            return {"status": status, "error_type": error_type, "error": detail, "results": results}
+            return {
+                "status": status,
+                "error_type": error_type,
+                "error": detail,
+                "results": results,
+            }
 
     # Every attempt failed.
     err = "; ".join(failures) if failures else "no browsers in chain"
@@ -553,24 +802,32 @@ async def search_forage(
         }
 
     collected: List[Dict[str, Any]] = []
-    seen_urls = set()
+    seen_keys: set = set()
     statuses: Dict[str, Dict[str, Any]] = {}
+    unresolved: Dict[str, int] = {}
 
-    def _ingest(batch: List[Dict[str, Any]]) -> None:
+    def _ingest(batch: List[Dict[str, Any]], engine_name: str) -> None:
         for r in batch:
-            u = _normalize_url(r.get("url", ""))
-            if not u or u in seen_urls:
+            key = _dedupe_key(r)
+            if not key[0] or key in seen_keys:
                 continue
-            seen_urls.add(u)
+            seen_keys.add(key)
+            r["_engine"] = engine_name
             collected.append(r)
 
     # 1. First engine alone (the configured order matters).
     first = names[0]
     st = await _fetch_engine(
-        config, browser, chain_for(first), first, query, max(PAGE_SIZE, limit), lang
+        config,
+        browser,
+        chain_for(first),
+        first,
+        query,
+        max(PAGE_SIZE, limit),
+        lang,
     )
     statuses[first] = st
-    _ingest(st.get("results", []))
+    _ingest(st.get("results", []), first)
 
     # 2. Extra engines only when needed (the first one failed or did not reach
     # the limit), one at a time and stopping as soon as the limit is met.
@@ -591,21 +848,40 @@ async def search_forage(
             retries=0,
         )
         statuses[name] = st_rest
-        _ingest(st_rest.get("results", []))
+        _ingest(st_rest.get("results", []), name)
 
     collected = collected[:limit]
     for idx, r in enumerate(collected):
         r["position"] = idx + 1
+
+    # Exact URLs last, and only for the results that are actually returned: a
+    # redirect token costs a request, so spending it on a result that the limit
+    # or the de-duplication would drop is waste.
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for result in collected:
+        referer = result.get("resolve_referer")
+        if result.get("resolve") and referer:
+            groups.setdefault(str(referer), []).append(result)
+    for referer, items in groups.items():
+        engine_name = str(items[0].get("_engine") or "")
+        left = await _apply_redirect_resolution(config, browser, items, referer, engine_name)
+        if left:
+            unresolved[engine_name] = unresolved.get(engine_name, 0) + left
 
     # Per-engine status summary (public, diagnostic).
     engines_public = {
         name: {
             "status": s.get("status", "error"),
             **({"error_type": s["error_type"]} if s.get("error_type") else {}),
-            **({"error": s.get("error")} if s.get("error") else {}),
+            **({"error": s["error"]} if s.get("error") else {}),
+            **({"url_fallback": unresolved[name]} if unresolved.get(name) else {}),
         }
         for name, s in statuses.items()
     }
+    for result in collected:
+        result.pop("_engine", None)
+        result.pop("resolve", None)
+        result.pop("resolve_referer", None)
 
     if not collected:
         # Distinguish "nothing found" from "everything failed".

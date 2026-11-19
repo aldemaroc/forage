@@ -225,6 +225,28 @@ override.
   waiting longer only delays the next engine. Server-rendered engines
   (google/bing/yahoo/ddg) carry the selector in the initial DOM; only SPAs need
   longer, and those are not in the default chain.
+- **A SERP never spells out the result URL.** Each engine hides it and each one
+  needs its own recovery, in this order of cost: inline unwrap (Google
+  `/url?q=`, Bing `/ck/a?u=a1<base64url>`, DuckDuckGo `/l/?uddg=`, Yahoo
+  `/RU=`), then a redirect resolve for the opaque token (Google
+  `/goto?url=`) and only then the `<cite>` breadcrumb, which is lossy. The old
+  parser cut the breadcrumb at the first `\u203a` and kept the host: that is how a
+  Google result came back as `https://github.com`. Breadcrumb segments are
+  joined back with `/`, and a segment truncated with `\u2026` is dropped.
+- **Google's redirect token is encrypted, not encoded.** base64-decoding
+  `/goto?url=CAES...` yields ciphertext; the only way through is to follow it.
+  Three things are not optional: the request goes through the search browser's
+  own request context (the cookies from the render are what make the token
+  valid), the `Referer` is the SERP URL (without it the chained token answers
+  400), and the requests are serial (in parallel they come back without a
+  destination).
+- **Google rations redirect resolves.** Past a handful of hops the answer is a
+  consent page whose meta refresh announces a delay (4s, then 8s, then 18s)
+  before the next token is valid; following it earlier returns 400. So the
+  resolver honors the announced delay while the budget lasts, then gives up and
+  keeps the breadcrumb URL, and the engine reports `url_fallback`. Resolving
+  only the results that are actually returned keeps the count low enough to
+  stay inside the ration.
 - **Xvfb leaves `/tmp/.X<n>-lock` behind when it dies** (container restart).
   The next start fails with "Server is already active for display n"; a stale
   lock (no Xvfb process behind it) has to be removed first. `app/display.py`

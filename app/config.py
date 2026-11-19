@@ -40,6 +40,9 @@ DEFAULTS: Dict[str, Any] = {
         "timeout": 15,
         "provider": "forage",             # "forage" (default; own SERP engines) or "searxng"
         "serp_timeout": 20,               # provider=forage: seconds per SERP render
+        "resolve_urls": True,             # provider=forage: spend engine redirect tokens (Google /goto)
+        "resolve_timeout": 8,             # seconds per redirect resolution request
+        "resolve_budget": 15,             # seconds for the whole URL resolution pass
     },
     "extract": {
         "timeout": 30,
@@ -165,6 +168,9 @@ class SearchConfig:
     timeout: int = 15
     provider: str = "searxng"  # "searxng" (default) or "forage" (own SERP engines)
     serp_timeout: int = 20  # provider=forage: seconds per SERP render
+    resolve_urls: bool = True  # provider=forage: follow engine redirect tokens for the exact URL
+    resolve_timeout: int = 8  # provider=forage: seconds per redirect resolution request
+    resolve_budget: int = 15  # provider=forage: seconds for the whole resolution pass
 
 
 @dataclass(frozen=True)
@@ -313,6 +319,9 @@ class ForageConfig:
                 timeout=search.get("timeout", DEFAULTS["search"]["timeout"]),
                 provider=search.get("provider", DEFAULTS["search"]["provider"]),
                 serp_timeout=search.get("serp_timeout", DEFAULTS["search"]["serp_timeout"]),
+                resolve_urls=bool(search.get("resolve_urls", DEFAULTS["search"]["resolve_urls"])),
+                resolve_timeout=int(search.get("resolve_timeout", DEFAULTS["search"]["resolve_timeout"])),
+                resolve_budget=int(search.get("resolve_budget", DEFAULTS["search"]["resolve_budget"])),
             ),
             extract=ExtractConfig(
                 **{
@@ -374,6 +383,16 @@ class ForageConfig:
         if self.search.serp_timeout < 1 or self.search.serp_timeout > 120:
             raise ValueError(
                 f"search.serp_timeout deve estar entre 1 e 120s: {self.search.serp_timeout}"
+            )
+        if self.search.resolve_timeout < 1 or self.search.resolve_timeout > 60:
+            raise ValueError(
+                "search.resolve_timeout must be between 1 and 60s: "
+                f"{self.search.resolve_timeout}"
+            )
+        if self.search.resolve_budget < 1 or self.search.resolve_budget > 120:
+            raise ValueError(
+                "search.resolve_budget must be between 1 and 120s: "
+                f"{self.search.resolve_budget}"
             )
         valid_browsers = ("playwright", "patchright", "scrapling", "obscura", "chrome-local")
         sb = self.browser.search

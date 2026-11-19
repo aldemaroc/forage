@@ -14,12 +14,14 @@ import logging
 import os
 import pathlib
 import random as _random
+import re
 import time
+from urllib.parse import urljoin
 
 from . import metrics, proctree
 from .netguard import ensure_allowed
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Union
+from typing import Any, Deque, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,46 @@ CHALLENGE_TITLES = (
     "checking your browser",
     "verifying you are human",
 )
+
+# --- Redirect token resolution ---------------------------------------------
+# Search engines hand out links the browser can follow but the DOM does not
+# spell out (Google: /goto?url=<encrypted token>). Following one is cheap, a
+# render is not, so the token is spent over the browser's request context.
+# Google chains the hop: the first answer is a consent page whose meta refresh
+# points at a second token before the destination shows up.
+_RESOLVE_HOPS = 3
+_META_REFRESH = re.compile(
+    r'<meta[^>]+content="\s*(\d+)\s*;\s*url=([^"]+)"', re.IGNORECASE
+)
+_REDIRECT_BODY_HREF = re.compile(r'<a[^>]+href="(https?://[^"]+)"', re.IGNORECASE)
+
+
+def parse_redirect_body(body: str, base: str) -> Tuple[float, Optional[str]]:
+    """Delay and destination announced by a redirect response body.
+
+    Two shapes show up: Google's consent interstitial (``<meta
+    http-equiv=refresh content="4;url=...">``) and its "302 Moved" page, which
+    spells the target in an ``<a href>`` even when the ``Location`` header is
+    absent. The delay is a real instruction: Google answers the chained token
+    with 400 when it is followed before the announced wait.
+    """
+    match = _META_REFRESH.search(body)
+    wait = float(match.group(1)) if match else 0.0
+    if not match:
+        match = _REDIRECT_BODY_HREF.search(body)
+    if not match:
+        return (0.0, None)
+    target = match.group(match.lastindex or 1).strip()
+    if target.startswith("//"):
+        target = "https:" + target
+    if target.startswith("/"):
+        target = urljoin(base, target)
+    return (wait, target if target.startswith("http") else None)
+
+
+def redirect_target_from_body(body: str, base: str) -> Optional[str]:
+    """Destination announced by a redirect response body (delay ignored)."""
+    return parse_redirect_body(body, base)[1]
 
 # Mozilla Readability.js (https://github.com/mozilla/readability), vendored at
 # build time. Runs inside the page (page.evaluate) to extract the article DOM
@@ -1302,6 +1344,137 @@ class SearchBrowser:
             if self.settings.settle_ms:
                 await self._page.wait_for_timeout(self.settings.settle_ms)
             return await self._page.content()
+
+    async def resolve_redirects(
+        self,
+        urls: List[str],
+        referer: Optional[str] = None,
+        timeout: int = 8,
+        budget: int = 15,
+        concurrency: int = 1,
+    ) -> List[Optional[str]]:
+        """Follow engine redirect tokens without rendering any page.
+
+        Each token is fetched through the browser's own request context, so it
+        carries the cookies the SERP render earned and costs one small HTTP
+        round trip instead of a navigation. The redirect is followed by hand
+        (``max_redirects=0``): a 3xx answers with ``Location``, a 200 wrapper
+        announces the next hop in a meta refresh or in the body of its own "302
+        Moved" page.
+
+        ``referer`` is not decoration: Google answers the chained token with 400
+        when the SERP URL is not the referer. ``concurrency`` stays 1 on purpose:
+        measured against Google, parallel requests to the token endpoint come
+        back without a destination, one at a time they resolve.
+
+        ``budget`` caps the whole pass in seconds: tokens left when it runs out
+        are skipped (the caller keeps the breadcrumb URL), so a slow engine can
+        never stall the search on URL recovery.
+
+        Returns one entry per input URL: the destination, or None when the token
+        could not be resolved.
+        """
+        if not urls:
+            return []
+        if self._context is None:
+            return [None] * len(urls)
+        deadline = time.monotonic() + max(1, budget)
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+
+        async def resolve_one(target: str) -> Optional[str]:
+            async with semaphore:
+                return await self._follow_redirect(target, referer, timeout, deadline)
+
+        resolved = list(await asyncio.gather(*(resolve_one(u) for u in urls)))
+
+        # One retry for the ones that failed, still inside the budget: a token
+        # that 400s on the first attempt usually resolves on the second.
+        for index, value in enumerate(resolved):
+            if value is not None:
+                continue
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.4)
+            resolved[index] = await self._follow_redirect(
+                urls[index], referer, timeout, deadline
+            )
+        return resolved
+
+    async def _follow_redirect(
+        self, url: str, referer: Optional[str], timeout: int, deadline: Optional[float] = None
+    ) -> Optional[str]:
+        context = self._context
+        if context is None:
+            return None
+        headers = {"referer": referer} if referer else {}
+        current = url
+        for _ in range(_RESOLVE_HOPS):
+            try:
+                response = await context.request.get(
+                    current,
+                    max_redirects=0,
+                    timeout=max(1, int(timeout)) * 1000,
+                    headers=headers,
+                )
+            except Exception as exc:  # noqa: BLE001 (a dead token is not a search failure)
+                logger.debug("redirect resolve failed (%s): %s", current[:100], exc)
+                return None
+            location = (response.headers.get("location") or "").strip()
+            if location.startswith("http"):
+                return location
+            try:
+                body = await response.text()
+            except Exception:  # noqa: BLE001
+                return None
+            wait, target = parse_redirect_body(body, current)
+            if not target:
+                logger.debug(
+                    "redirect resolve: no destination in the %s answer (%s)",
+                    response.status,
+                    current[:100],
+                )
+                return None
+            if wait and deadline is not None:
+                # The engine asked for N seconds before the next hop is valid.
+                remaining = deadline - time.monotonic()
+                if wait > remaining:
+                    logger.debug(
+                        "redirect resolve: engine asked for %.0fs, %.0fs left in the budget",
+                        wait,
+                        max(0.0, remaining),
+                    )
+                    return None
+                await asyncio.sleep(wait)
+            current = target
+        return None
+
+    async def resolve_by_navigation(
+        self, token: str, timeout: int = 8, wait: float = 1.5
+    ) -> Optional[str]:
+        """Last-resort resolution: navigate the token and read where it lands.
+
+        Google stops honoring ``/goto`` over the request API after a handful of
+        hops in the same session, but the navigation the token was made for still
+        works. The load is never waited for: ``wait_until="commit"`` returns as
+        soon as the redirect lands, which is where the destination URL already
+        lives, and the page is thrown away with the search.
+        """
+        page = self._page
+        if page is None:
+            return None
+        try:
+            await page.goto(token, wait_until="commit", timeout=max(1, int(timeout)) * 1000)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("redirect navigation failed (%s): %s", token[:80], exc)
+            return None
+        deadline = time.monotonic() + max(0.0, wait)
+        while True:
+            current = page.url
+            if current.startswith("http") and "/goto?url=" not in current:
+                return current
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.15)
 
     async def _humanize(self) -> None:
         """Mouse movement, a small scroll and a short dwell before navigating.

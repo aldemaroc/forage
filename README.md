@@ -210,9 +210,28 @@ Response (Hermes web-search envelope):
 ```json
 {
   "success": true,
-  "data": { "web": [ { "title": "...", "url": "...", "description": "...", "position": 1 } ] }
+  "data": {
+    "web": [
+      {
+        "title": "...",
+        "url": "https://example.com/blog/article-foo",
+        "description": "...",
+        "position": 1,
+        "url_source": "resolved"
+      }
+    ],
+    "engines": { "google": { "status": "ok" } }
+  }
 }
 ```
+
+`url_source` says how the URL was recovered (provider=forage): `href` when the
+engine wrapper decoded inline to the exact URL (Bing, DuckDuckGo, Yahoo),
+`resolved` when the engine's redirect token was followed over HTTP (Google), and
+`cite` when only the visible breadcrumb was available: that URL is real but may
+be missing a truncated tail, and the engine entry then carries
+`url_fallback: <count>`. No result is ever returned as a bare domain because of a
+breadcrumb.
 
 Response header `X-Forage-Cache: hit|miss|bypass|disabled`.
 
@@ -260,6 +279,40 @@ If a page is behind an anti-bot challenge (Cloudflare etc.), Forage returns a cl
 ### `POST /admin/cache/purge`
 
 Clears the in-memory caches (auth-gated). Returns `{ "cleared": N }`.
+
+### `GET /admin/requests`
+
+Most recent searches and extractions, newest first (auth-gated). One event per
+search and one per extracted URL:
+
+```json
+{
+  "success": true,
+  "count": 1,
+  "events": [
+    {
+      "ts": 1795085870.53,
+      "kind": "search",
+      "status": "ok",
+      "cache": "miss",
+      "provider": "forage",
+      "query": "prometheus histogram",
+      "limit": 5,
+      "engines": { "google": "ok", "bing": "error" },
+      "results": 5,
+      "ms": 14365.7
+    }
+  ]
+}
+```
+
+Extraction events carry `url`, `method` and `chars` instead of `query`,
+`results` and `engines`; a failed request adds `error` with the service's own
+message. Filters: `?limit=100&kind=search|extract&status=ok|error`. The events
+come from an append-only JSONL (`FORAGE_REQLOG`, default
+`/var/lib/forage/requests.jsonl`) shared by every worker, so mount a volume on
+that directory to keep it across container re-creates (see
+[docs/CONFIG.md](docs/CONFIG.md)).
 
 ### Firecrawl compatibility: `POST /v1/scrape`, `POST /v1/search`
 

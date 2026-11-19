@@ -42,7 +42,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from . import __version__
-from . import metrics, proctree
+from . import metrics, proctree, reqlog
 from .auth import extract_bearer, key_is_valid, load_api_keys
 from .browser import BrowserPool, SearchBrowser
 from .cache import TTLCache
@@ -258,6 +258,34 @@ def _extract_method_label(method: Optional[str]) -> str:
     return method if method in _EXTRACT_METHODS else "other"
 
 
+def _results_count(result: Dict[str, Any]) -> int:
+    """Number of web results actually returned.
+
+    ``data`` is a dict (``{"web": [...], "engines": {...}}``) for the built-in
+    provider and a plain list for SearXNG, so ``len(data)`` is not the count.
+    """
+    data = result.get("data")
+    if isinstance(data, dict):
+        web = data.get("web")
+        return len(web) if isinstance(web, list) else 0
+    if isinstance(data, list):
+        return len(data)
+    return 0
+
+
+def _engine_status(result: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Per-engine outcome (ok / error / no_results), when the provider reports it."""
+    engines = None
+    data = result.get("data")
+    if isinstance(data, dict):
+        engines = data.get("engines")
+    if engines is None:
+        engines = result.get("engines")
+    if not isinstance(engines, dict):
+        return None
+    return {str(name): str((info or {}).get("status", "?")) for name, info in engines.items()}
+
+
 def _search_cache_key(
     query: str, limit: int, language: Optional[str], engines: Optional[List[str]]
 ) -> str:
@@ -298,6 +326,19 @@ async def run_search(
                 time.perf_counter() - started,
                 len(cached.get("data") or []),
             )
+            reqlog.record(
+                "search",
+                status="ok" if cached.get("success") else "error",
+                cache="hit",
+                provider=provider,
+                query=query,
+                limit=limit,
+                language=language,
+                engines=_engine_status(cached),
+                results=_results_count(cached),
+                ms=round((time.perf_counter() - started) * 1000, 1),
+                error=cached.get("error"),
+            )
             return cached, "hit"
         metrics.observe_cache("search", "miss")
 
@@ -330,12 +371,26 @@ async def run_search(
         )
 
     header = "miss" if cache_enabled else ("bypass" if bypass_cache else "disabled")
+    elapsed = time.perf_counter() - started
     metrics.observe_search(
         provider,
         header,
         "ok" if result.get("success") else "error",
-        time.perf_counter() - started,
+        elapsed,
         len(result.get("data") or []),
+    )
+    reqlog.record(
+        "search",
+        status="ok" if result.get("success") else "error",
+        cache=header,
+        provider=provider,
+        query=query,
+        limit=limit,
+        language=language,
+        engines=_engine_status(result),
+        results=_results_count(result),
+        ms=round(elapsed * 1000, 1),
+        error=result.get("error"),
     )
     return result, header
 
@@ -372,8 +427,33 @@ async def run_extract(
                     0.0,
                     len(item.get("markdown") or item.get("content") or ""),
                 )
+                reqlog.record(
+                    "extract",
+                    status="error" if item.get("error") else "ok",
+                    cache="hit",
+                    url=item.get("url"),
+                    method=item.get("method"),
+                    chars=len(item.get("markdown") or item.get("content") or ""),
+                    ms=0.0,
+                    error=item.get("error"),
+                )
             return cached, "hit"
         metrics.observe_cache("extract", "miss")
+
+    cache_state = "miss" if cache_enabled else ("bypass" if bypass_cache else "disabled")
+
+    def _log_extract(url: str, result: Dict[str, Any], started: float) -> None:
+        payload = result.get("markdown") or result.get("content") or ""
+        reqlog.record(
+            "extract",
+            status="error" if result.get("error") else "ok",
+            cache=cache_state,
+            url=url,
+            method=result.get("method"),
+            chars=len(payload),
+            ms=round((time.perf_counter() - started) * 1000, 1),
+            error=result.get("error"),
+        )
 
     async def _extract_one(url: str) -> Dict[str, Any]:
         url_started = time.perf_counter()
@@ -394,11 +474,15 @@ async def run_extract(
             # whole story and it names the config key that lifts the check.
             logger.warning("Extract refused for %s: %s", url, exc)
             metrics.observe_extract("other", "blocked", time.perf_counter() - url_started, 0)
-            return {"url": url, "error": str(exc)}
+            refused = {"url": url, "error": str(exc), "blocked": True}
+            _log_extract(url, refused, url_started)
+            return refused
         except Exception as exc:  # noqa: BLE001
             logger.exception("Extract failed for %s", url)
             metrics.observe_extract("other", "error", time.perf_counter() - url_started, 0)
-            return {"url": url, "error": str(exc)}
+            failed = {"url": url, "error": str(exc)}
+            _log_extract(url, failed, url_started)
+            return failed
         payload = result.get("markdown") or result.get("content") or ""
         metrics.observe_extract(
             _extract_method_label(result.get("method")),
@@ -406,6 +490,7 @@ async def run_extract(
             time.perf_counter() - url_started,
             len(payload),
         )
+        _log_extract(url, result, url_started)
         return result
 
     # Parallel extraction: static fetches run concurrently; browser renders are
@@ -559,6 +644,23 @@ async def purge_cache(_auth: None = Depends(require_auth)) -> dict:
     """Clear the in-memory caches (search + extract)."""
     cleared = search_cache.clear() + extract_cache.clear()
     return {"cleared": cleared}
+
+
+@app.get("/admin/requests", include_in_schema=False)
+async def recent_requests(
+    limit: int = 100,
+    kind: Optional[str] = None,
+    status: Optional[str] = None,
+    _auth: None = Depends(require_auth),
+) -> dict:
+    """Recent searches and extractions, newest first.
+
+    One event per search and one per extracted URL, with query/url, status,
+    duration, cache state and the per-engine outcome. Backed by the append-only
+    JSONL in ``app/reqlog.py`` (shared by every worker, survives restarts).
+    """
+    events = reqlog.tail(limit=limit, kind=kind, status=status)
+    return {"success": True, "count": len(events), "log": reqlog.stats(), "events": events}
 
 
 # Firecrawl-compatible surface, mounted once per version prefix from one shared

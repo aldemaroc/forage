@@ -22,6 +22,10 @@ services:
       - "127.0.0.1:3672:3672"   # host-only bind: nothing external reaches it
     volumes:
       - ./config.yaml:/etc/forage/config.yaml:ro   # bind mount, read-only
+      # Request log (JSONL): one line per search/extraction, read back by
+      # GET /admin/requests. Kept outside the container layer so it survives a
+      # recreate; 4 MB cap with one rotation (FORAGE_REQLOG_MAX_BYTES).
+      - ./data:/var/lib/forage
     env_file: .env
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3672/health', timeout=3).status==200 else 1)"]

@@ -7,6 +7,46 @@ testing phase, and their history lives in the commit log.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-request log (`GET /admin/requests`).** The metrics said how many searches
+  failed, never which ones. Every search and every extracted URL now leaves one
+  event with status, duration, cache state, result count, the per-engine outcome
+  and the error message. It is an append-only JSONL (`FORAGE_REQLOG`, 4 MB with
+  one rotation) instead of a deque in memory: with more than one worker, memory
+  would only show the requests that landed on the worker answering the call.
+  The compose file mounts it on `./data` so it survives a container re-create.
+- **Exact result URLs (issue #17).** Results used to come back as the bare host
+  because the parser cut the visible `<cite>` breadcrumb at its first separator,
+  which is exactly where the path starts. Every engine is now unwrapped on its own
+  terms: Bing's `ck/a?u=a1<base64url>`, DuckDuckGo's `l/?uddg=` and Yahoo's `RU=`
+  are decoded inline (no request), and Google's encrypted `/goto?url=` token is
+  followed through the search browser's own request context, serially, honoring
+  the delay Google announces and capped by `search.resolve_budget`. Each result
+  carries `url_source` (`href`, `resolved` or `cite`), and an engine that had to
+  fall back to the breadcrumb reports `url_fallback: <count>` in the engine
+  summary, so an approximate URL is visible instead of silent.
+- Brave results: the parser recovered nothing from `a.l1` hrefs (`/go/v1#<token>`)
+  and dropped every result. The URL now comes from the `<cite>` breadcrumb, with
+  `url_source: cite` when the anchor carries no destination.
+
+### Fixed
+
+- De-duplication keyed on the URL alone collapsed every result of the same host
+  into the first one, so `site:github.com` returned a single row. When the URL
+  came from the breadcrumb (approximate), the title is now part of the key.
+- A result whose `<cite>` holds no URL (Google prints the date for some cards)
+  used to be dropped by the de-duplication step; it is kept and resolved.
+
+### Changed
+
+- New keys `search.resolve_urls` (default `true`), `search.resolve_timeout`
+  (`8`) and `search.resolve_budget` (`15`), provider=forage.
+- New env vars `FORAGE_REQLOG` (log path, `off` disables it) and
+  `FORAGE_REQLOG_MAX_BYTES` (rotation threshold, default 4 MB).
+- `tests/test_serp_urls.py`: unit tests for the URL recovery and the redirect
+  body parsing (stdlib unittest, no browser, no network).
+
 ## [1.2.2] - 2026-11-17
 
 ### Added
