@@ -9,13 +9,27 @@ testing phase, and their history lives in the commit log.
 
 ### Added
 
+- **Plugin timeouts come from the environment (issue #16).** The Hermes plugin
+  hard-coded its client timeouts (`timeout=30` on search, 60 on extract), so a
+  challenged SERP plus a retry and a fallback engine, which the service may
+  legitimately spend 70 to 95 s on, ended in a client-side failure. Search and
+  extract now read `FORAGE_SEARCH_TIMEOUT` (default 90) and
+  `FORAGE_EXTRACT_TIMEOUT` (default 60) per call, so changing them needs no
+  restart and no patching of the installed `provider.py`. Both are declared in
+  the plugin manifest (`optional_env`);
+  `full_extract`'s per-call `timeout` keeps precedence over them.
 - **Per-request log (`GET /admin/requests`).** The metrics said how many searches
   failed, never which ones. Every search and every extracted URL now leaves one
   event with status, duration, cache state, result count, the per-engine outcome
   and the error message. It is an append-only JSONL (`FORAGE_REQLOG`, 4 MB with
   one rotation) instead of a deque in memory: with more than one worker, memory
   would only show the requests that landed on the worker answering the call.
-  The compose file mounts it on `./data` so it survives a container re-create.
+  The compose file puts it on a tmpfs, so it lives in RAM and a container restart
+  leaves nothing behind.
+- **Container log capped.** The shipped compose keeps `docker logs` working but
+  bounds it: the `local` driver with `max-size=10m` and `max-file=1`, since the
+  default `json-file` grows without limit. Request records stay in RAM (the
+  tmpfs), so a restart leaves no log of who searched what.
 - **Exact result URLs (issue #17).** Results used to come back as the bare host
   because the parser cut the visible `<cite>` breadcrumb at its first separator,
   which is exactly where the path starts. Every engine is now unwrapped on its own

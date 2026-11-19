@@ -22,11 +22,24 @@ services:
       - "127.0.0.1:3672:3672"   # host-only bind: nothing external reaches it
     volumes:
       - ./config.yaml:/etc/forage/config.yaml:ro   # bind mount, read-only
-      # Request log (JSONL): one line per search/extraction, read back by
-      # GET /admin/requests. Kept outside the container layer so it survives a
-      # recreate; 4 MB cap with one rotation (FORAGE_REQLOG_MAX_BYTES).
-      - ./data:/var/lib/forage
+    # Everything that records what happened lives in RAM on purpose. The request
+    # log (GET /admin/requests) and the app log are written under this tmpfs,
+    # which comes back empty on every container start: restart the container and
+    # no log, record or counter survives, on disk or in the image layer.
+    tmpfs:
+      - /var/lib/forage:size=16m,mode=0755
     env_file: .env
+    # Container stdout is kept on the host, but capped: `local` is Docker's
+    # rotating driver and max-size/max-file put a hard ceiling on it (10 MB,
+    # a single file). Plain json-file would accumulate without limit.
+    logging:
+      driver: "local"
+      options:
+        max-size: "10m"
+        max-file: "1"
+        # The local driver compresses by default, and compression refuses to
+        # run with a single file: without this the container does not start.
+        compress: "false"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3672/health', timeout=3).status==200 else 1)"]
       interval: 30s

@@ -15,6 +15,8 @@ Env vars::
     FORAGE_URL=http://localhost:3672       # base URL of the Forage service
     FORAGE_API_KEY=...                     # optional Bearer key (auth.enabled)
     FORAGE_BYPASS_CACHE=true|false         # optional: always bypass cache
+    FORAGE_SEARCH_TIMEOUT=90               # optional: seconds to wait for a search
+    FORAGE_EXTRACT_TIMEOUT=60              # optional: seconds to wait for an extract
 """
 
 from __future__ import annotations
@@ -66,6 +68,43 @@ def _forage_api_key() -> Optional[str]:
 
 def _bypass_cache() -> bool:
     return _env("FORAGE_BYPASS_CACHE", "").lower() in ("1", "true", "yes")
+
+
+# Client-side HTTP timeouts, in seconds. A search renders a SERP, retries a
+# challenged render and may fall back to another engine, so the service can spend
+# 70 to 95s on one query without misbehaving: the client must not hang up first.
+# An extract is a per-URL budget server-side (extract.timeout), so its client
+# timeout only has to cover the slowest allowed extraction plus the queue.
+DEFAULT_SEARCH_TIMEOUT = 90.0
+DEFAULT_EXTRACT_TIMEOUT = 60.0
+
+
+def _timeout(key: str, default: float) -> float:
+    """Seconds from an env var, or the default when it is missing or unusable.
+
+    Read per call, not cached at import: changing the variable only requires a new
+    request, not a Hermes restart.
+    """
+    raw = _env(key)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number, using %.0fs", key, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("%s=%r must be positive, using %.0fs", key, raw, default)
+        return default
+    return value
+
+
+def _search_timeout() -> float:
+    return _timeout("FORAGE_SEARCH_TIMEOUT", DEFAULT_SEARCH_TIMEOUT)
+
+
+def _extract_timeout() -> float:
+    return _timeout("FORAGE_EXTRACT_TIMEOUT", DEFAULT_EXTRACT_TIMEOUT)
 
 
 async def _blocked_reason(url: str) -> Optional[str]:
@@ -175,7 +214,7 @@ class ForageWebSearchProvider(WebSearchProvider):
                 f"{base}/search",
                 json={"query": query, "limit": max(1, min(int(limit), 50))},
                 headers=self._headers(),
-                timeout=30,
+                timeout=_search_timeout(),
             )
             resp.raise_for_status()
             data = resp.json()
@@ -208,7 +247,7 @@ class ForageWebSearchProvider(WebSearchProvider):
             for u in allowed
         ]
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httpx.AsyncClient(timeout=_extract_timeout()) as client:
                 resp = await client.post(
                     f"{base}/extract",
                     json={"urls": allowed, "formats": formats},
@@ -267,7 +306,8 @@ class ForageWebSearchProvider(WebSearchProvider):
             for u in allowed
         ]
         try:
-            async with httpx.AsyncClient(timeout=timeout or 60) as client:
+            client_timeout = float(timeout) if timeout else _extract_timeout()
+            async with httpx.AsyncClient(timeout=client_timeout) as client:
                 resp = await client.post(
                     f"{base}/extract",
                     json=payload,

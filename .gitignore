@@ -20,9 +20,6 @@ dist/
 build/
 *.egg-info/
 
-# Request log (docker compose bind mount)
-data/
-
 # Editors / OS
 .vscode/
 .idea/

@@ -18,3 +18,9 @@ optional_env:
   - name: FORAGE_BYPASS_CACHE
     description: "1/true to always bypass the instance cache"
     password: false
+  - name: FORAGE_SEARCH_TIMEOUT
+    description: "Seconds to wait for a search (default 90: a challenged SERP plus a fallback engine can take that long)"
+    password: false
+  - name: FORAGE_EXTRACT_TIMEOUT
+    description: "Seconds to wait for an extract (default 60)"
+    password: false

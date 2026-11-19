@@ -310,9 +310,10 @@ Extraction events carry `url`, `method` and `chars` instead of `query`,
 `results` and `engines`; a failed request adds `error` with the service's own
 message. Filters: `?limit=100&kind=search|extract&status=ok|error`. The events
 come from an append-only JSONL (`FORAGE_REQLOG`, default
-`/var/lib/forage/requests.jsonl`) shared by every worker, so mount a volume on
-that directory to keep it across container re-creates (see
-[docs/CONFIG.md](docs/CONFIG.md)).
+`/var/lib/forage/requests.jsonl`) shared by every worker. The shipped compose
+puts that directory on a tmpfs, so the log lives in RAM and a container restart
+leaves nothing behind; mount a volume there instead if you want it to persist
+(see [docs/CONFIG.md](docs/CONFIG.md)).
 
 ### Firecrawl compatibility: `POST /v1/scrape`, `POST /v1/search`
 

@@ -191,11 +191,13 @@ per extracted URL, with `status`, `ms`, `cache`, the query/URL, the result count
 and the per-engine outcome (`engines`), or the error message.
 
 It is backed by an append-only JSONL (`FORAGE_REQLOG`, default
-`/var/lib/forage/requests.jsonl`) rather than process memory, because
+`/var/lib/forage/requests.jsonl`) rather than an in-process deque, because
 `server.workers > 1` would otherwise show only the requests that happened to
-land on the worker answering the call. Mount a volume on that directory to keep
-the log across container re-creates. Records are capped by size (one rotation)
-and the log never fails a request.
+land on the worker answering the call. The shipped compose mounts that
+directory as a 16 MB **tmpfs**: the log lives in RAM and comes back empty on
+every container start. Mount a volume on it instead when the log has to
+persist. Records are capped by size (one rotation) and the log never fails a
+request.
 
 ## Environment variables
 

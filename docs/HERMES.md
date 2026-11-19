@@ -33,6 +33,8 @@ hermes plugins list | grep forage   # → web-forage ... enabled
 FORAGE_URL=http://localhost:3672
 # FORAGE_API_KEY=...          # only if you enable auth on Forage
 # FORAGE_BYPASS_CACHE=true    # optional: always bypass Forage's cache
+# FORAGE_SEARCH_TIMEOUT=90    # optional: client timeout for a search (seconds)
+# FORAGE_EXTRACT_TIMEOUT=60   # optional: client timeout for an extract (seconds)
 ```
 
 Restart the Hermes gateway so the plugin loads:
@@ -112,6 +114,8 @@ The service's `raw_content_markdown: true` (default) makes `raw_content` mirror 
 | Plugin not listed as enabled | Run `hermes plugins enable web/forage`; check the folder is `~/.hermes/plugins/web/forage/` |
 | 401 from Forage | Auth enabled but `FORAGE_API_KEY` missing/mismatched in Hermes `.env` |
 | Search works, extract hangs | Forage browser pool cold start on first extract (~5-10 s); subsequent calls reuse warm browsers |
+| Search fails right around a round number of seconds (30, 45, 60) | The plugin gave up before the service answered: a challenged SERP plus a retry and a fallback engine can take 70 to 95 s. Raise `FORAGE_SEARCH_TIMEOUT` in Hermes' `.env` (default 90) instead of patching `provider.py`, which the plugin install overwrites on boot |
+| Extract fails right around 60 s | Same on the extract path: raise `FORAGE_EXTRACT_TIMEOUT` (client) and/or `extract.timeout` (Forage's per-URL budget) |
 
 ## Files in this repo
 
