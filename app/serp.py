@@ -42,7 +42,7 @@ import logging
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -250,10 +250,14 @@ def _build_google_url(query: str, language: str, limit: int) -> str:
 
 
 def _build_bing_url(query: str, language: str, limit: int) -> str:
-    return (
-        "https://www.bing.com/search"
-        f"?q={quote(query)}&setlang={language}&count={min(limit, PAGE_SIZE)}"
-    )
+    """Bare search URL, the same shape Bing's own address bar produces.
+
+    ``setlang`` and ``count`` are deliberately absent: they turn the request
+    into an external query, Bing answers with a session-bound ``rdr`` redirect,
+    and the SERP can fall back to unrelated results. ``quote_plus`` is the
+    form encoding Bing expects for spaces.
+    """
+    return "https://www.bing.com/search?q=" + quote_plus(query)
 
 
 def _build_yahoo_url(query: str, language: str, limit: int) -> str:
